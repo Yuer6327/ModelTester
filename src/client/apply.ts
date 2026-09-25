@@ -20,7 +20,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import type { ConversationPort } from './conversation.ts'
 import { ModelTesterPanel } from './ModelTesterPanel.tsx'
 import { createStatsStore } from './session-store.ts'
-import type { ModelTesterFace } from './slots.ts'
+import type { ModelTesterActions, ModelTesterFace } from './slots.ts'
 import { en, NS, zh, type ModelTesterKey } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -76,8 +76,47 @@ export function apply(ctx: ClientContext): void {
     name: 'shell.overlay',
     id: 'modeltester',
     locale: NS,
-    inject: (): ModelTesterFace => ({ hooks: { stats } }),
+    inject: (): ModelTesterFace => ({ hooks: { stats }, actions: { sendProbe: sendProbeOf(ctx) } }),
   }, ModelTesterPanel))
+}
+
+/**
+ * Probe-send over the host sessions face: `create()` a fresh session, `open()`
+ * it as current, then `prompt()` the probe text through the session face — the
+ * same client contract the web app's own input uses. Every member is
+ * feature-detected; older hosts simply report `unavailable`.
+ */
+function sendProbeOf(ctx: ClientContext): ModelTesterActions['sendProbe'] {
+  return async (text) => {
+    try {
+      const sessions = ctx.sessions as unknown as {
+        create?: () => Promise<string>
+        open?: (id: string) => void
+        binding?: (id: string) => {
+          session?: {
+            prompt?: (parts: readonly { type: 'text'; text: string }[], mode: 'queue' | 'steer') =>
+              Promise<{ ok?: boolean; error?: { message?: string } }>
+          }
+        }
+      }
+      if (typeof sessions.create !== 'function' || typeof sessions.open !== 'function') {
+        return { ok: false, error: 'unavailable' }
+      }
+      const id = await sessions.create()
+      sessions.open(id)
+      const session = sessions.binding?.(id)?.session
+      const prompt = (session as { prompt?: unknown } | undefined)?.prompt
+      if (typeof prompt !== 'function') return { ok: false, error: 'unavailable' }
+      const result = await (prompt as (parts: readonly { type: 'text'; text: string }[], mode: 'queue' | 'steer') =>
+        Promise<{ ok?: boolean; error?: { message?: string } }>).call(session, [{ type: 'text', text }], 'queue')
+      if (result !== undefined && result !== null && result.ok === false) {
+        return { ok: false, error: result.error?.message ?? 'rejected' }
+      }
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
 }
 
 /**

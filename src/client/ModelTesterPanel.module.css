@@ -311,26 +311,26 @@
   font-weight: 600;
 }
 
-.grayBadge {
+.attrBadge {
   font-size: 12px;
   line-height: 18px;
   font-weight: 600;
   color: var(--dsw-alias-label-secondary);
 }
 
-.grayBadge[data-attr='likely'] {
+.attrBadge[data-attr='likely'] {
   color: var(--dsw-alias-brand-primary);
 }
 
-.grayBadge[data-attr='possible'] {
+.attrBadge[data-attr='possible'] {
   color: var(--dsw-alias-state-warn-label);
 }
 
-.grayBadge[data-attr='none'] {
+.attrBadge[data-attr='none'] {
   color: var(--dsw-alias-label-tertiary);
 }
 
-.grayDocs {
+.attrDocs {
   display: grid;
   flex: none;
   place-items: center;
@@ -346,24 +346,24 @@
   text-decoration: none;
 }
 
-.grayDocs:hover {
+.attrDocs:hover {
   color: var(--dsw-alias-label-primary);
   border-color: var(--dsw-alias-label-secondary);
 }
 
-.grayDocs:focus-visible {
+.attrDocs:focus-visible {
   outline: 2px solid var(--dsw-alias-brand-primary);
   outline-offset: 1px;
 }
 
-.grayFacts {
+.leakFacts {
   margin: 0 0 6px;
   font-size: 12px;
   line-height: 18px;
   color: var(--dsw-alias-label-primary);
 }
 
-.grayCode {
+.leakCode {
   display: inline-block;
   margin-left: 6px;
   padding: 0 5px;

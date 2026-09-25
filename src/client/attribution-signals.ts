@@ -18,10 +18,18 @@
  * Adding a community report is a one-row edit here; bump ATTRIBUTION_VERSION.
  */
 
-import { DIRTY_TOKENS } from './gray-signals.ts'
 import { PATTERNS } from './keywords.ts'
 import type { WordCounts } from './stats.ts'
 import type { PatternCounts } from './stats.ts'
+
+/** Community-attested dirty tokens leaking into reasoning (case-insensitive substring). */
+const DIRTY_PATTERNS: readonly { id: string; pattern: RegExp }[] = [
+  { id: 'Nameeee', pattern: /\bNameeee\b/ },
+  { id: 'antml:thinking', pattern: /antml:thinking/i },
+  { id: '<antml', pattern: /<\/?antml\b/i },
+  { id: 'EDMFunc', pattern: /\bEDMFunc\b/ },
+  { id: 'everydaycalculation', pattern: /\beverydaycalculation\b/i },
+]
 
 /** Version of the attribution table and scoring rules. */
 export const ATTRIBUTION_VERSION = 5 as const
@@ -122,7 +130,7 @@ const DIRTY_ATTRIBUTION: Readonly<Record<string, {
 /** Regex-table rows for the community dirty tokens, merged by attribution id. */
 const dirtySignals: AttributionSignal[] = (() => {
   const byId = new Map<string, { match: RegExp[]; row: (typeof DIRTY_ATTRIBUTION)[string] }>()
-  for (const token of DIRTY_TOKENS) {
+  for (const token of DIRTY_PATTERNS) {
     const row = DIRTY_ATTRIBUTION[token.id]
     if (row === undefined) continue
     const existing = byId.get(row.id)

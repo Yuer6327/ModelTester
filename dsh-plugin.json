@@ -3,7 +3,7 @@
   "manifestVersion": "0.15",
   "id": "io.github.yuer6327.modeltester",
   "name": "ModelTester",
-  "version": "0.0.4-alpha.1",
+  "version": "0.0.5-alpha.1",
   "facets": {
     "host": {
       "entry": "lib/std/host.js",

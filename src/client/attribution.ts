@@ -19,7 +19,6 @@
  */
 
 import type { AssistantBlockView, ConversationView } from './conversation.ts'
-import type { GrayProbe } from './graytest.ts'
 import {
   ALL_SIGNALS, ATTRIBUTION_VERSION, DERIVED_SIGNALS, SCANNED_SIGNALS, VENDORS, derivedHits,
   type AttributionSignal, type EvidenceKind, type EvidenceTier, type SignalId, type TrajectoryInput, type Vendor,
@@ -402,7 +401,7 @@ export function attributeSession(
 /** Build the clipboard evidence pack (pure data — no network). */
 export function evidencePack(
   report: AttributionReport,
-  meta: { sessionId: string | undefined; gray: GrayProbe },
+  meta: { sessionId: string | undefined },
 ): Record<string, unknown> {
   return {
     product: 'modeltester',
@@ -412,12 +411,5 @@ export function evidencePack(
     verdict: report.verdict,
     candidates: report.candidates,
     evidence: report.evidence,
-    gray: {
-      verdict: meta.gray.verdict,
-      profile: meta.gray.profile,
-      imDoing: meta.gray.imDoing,
-      dirtyTokens: meta.gray.dirtyTokens,
-      fingerprints: meta.gray.fingerprints,
-    },
   }
 }

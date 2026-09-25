@@ -17,7 +17,6 @@
 
 import type { ConversationNodeView, ConversationView } from './conversation.ts'
 import { attributeSession, attributionTurnCacheFor } from './attribution.ts'
-import { grayTurnCacheFor, probeGraySession } from './graytest.ts'
 import {
   CLASSIFIER_VERSION, emptySessionCounts, foldBlock, toTrajectoryStats,
   type SessionCounts, type TrajectoryStats,
@@ -68,9 +67,7 @@ export class SessionStatsAccumulator {
   /** Visible-text diagnostic totals — block count + characters only. */
   private textBlocks = 0
   private textChars = 0
-  /** Per-session gray-turn memoization (keyed by assistant node identity). */
-  readonly grayTurnCache = grayTurnCacheFor(this)
-  /** Per-session attribution-scan memoization (same keying). */
+  /** Per-session attribution-scan memoization (keyed by assistant node identity). */
   readonly attributionTurnCache = attributionTurnCacheFor(this)
 
   /**
@@ -124,12 +121,10 @@ export class SessionStatsAccumulator {
         }
       }
     }
-    const gray = probeGraySession(snapshot, this.grayTurnCache)
     return toTrajectoryStats(
       live,
       snapshot.partial !== null,
       { textBlocks, textChars },
-      gray,
       attributeSession(snapshot, { words: live.words, patterns: live.patterns }, this.attributionTurnCache),
     )
   }

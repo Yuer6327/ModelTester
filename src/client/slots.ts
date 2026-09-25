@@ -14,12 +14,24 @@ import type {
 } from '@deepseek-ai/dsh-client-ui-slots'
 import type { StatsSnapshot } from './session-store.ts'
 
+/** Probe-send actions backed by the host sessions face (feature-detected). */
+export interface ModelTesterActions {
+  /**
+   * Create a fresh session, open it as current, and send `text` as the first
+   * user prompt. Returns `ok: false` with a stable error when the host face
+   * does not expose create/open/prompt.
+   */
+  sendProbe(text: string): Promise<{ ok: boolean; error?: string }>
+}
+
 /** Business face injected into the ModelTester panel component. */
 export interface ModelTesterFace {
   hooks: {
     /** Live per-session trajectory stats (persisted, full-history). */
     stats: HostObservable<StatsSnapshot>
   }
+  /** Optional probe-send actions (present when the host face is available). */
+  actions?: ModelTesterActions
 }
 
 /** Full composed props of the ModelTester panel. */

@@ -18,7 +18,6 @@
 
 import type { AssistantBlockView, ConversationView } from './conversation.ts'
 import { attributeSession, emptyAttribution, type AttributionReport } from './attribution.ts'
-import { emptyGrayProbe, probeGraySession, type GrayProbe } from './graytest.ts'
 import {
   FIRST_TOKEN_ORDER, GROUPS, LATER_TOKEN_ORDER, PATTERNS, type Group, type Mode,
 } from './keywords.ts'
@@ -98,11 +97,6 @@ export interface TrajectoryStats {
   readonly mode: Mode
   /** 0..1 hesitation pressure: letMe / (we + let's + letMe). */
   readonly hesitation: number
-  /**
-   * Gray-test probe over **all loaded reasoning blocks**. Independent of the
-   * 0813 session classifier.
-   */
-  readonly gray: GrayProbe
   /**
    * Vendor-attribution report over the same surface: ranked candidates plus
    * the per-signal evidence ledger (structural fingerprints — never an
@@ -257,14 +251,12 @@ export function anomalyOf(
  * @param counts - folded reasoning counts.
  * @param streaming - whether a turn is streaming.
  * @param diagnostics - visible-text totals used for the anomaly grade.
- * @param gray - session-wide gray-test probe (defaults to empty).
  * @param attribution - vendor-attribution report (defaults to empty).
  */
 export function toTrajectoryStats(
   counts: SessionCounts,
   streaming: boolean,
   diagnostics: { textBlocks: number; textChars: number },
-  gray: GrayProbe = emptyGrayProbe(),
   attribution: AttributionReport = emptyAttribution(),
 ): TrajectoryStats {
   const groups = {} as Record<Group, number>
@@ -304,7 +296,6 @@ export function toTrajectoryStats(
     shares,
     mode,
     hesitation,
-    gray,
     attribution,
   }
 }
@@ -335,12 +326,10 @@ export function computeStats(snapshot: ConversationView | undefined): Trajectory
   if (snapshot.partial !== null) {
     for (const block of snapshot.partial.blocks) fold(block)
   }
-  const gray = probeGraySession(snapshot)
   return toTrajectoryStats(
     counts,
     snapshot.partial !== null,
     { textBlocks, textChars },
-    gray,
     attributeSession(snapshot, { words: counts.words, patterns: counts.patterns }),
   )
 }

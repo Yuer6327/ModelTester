@@ -20,12 +20,12 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { formatCount, type TrajectoryStats } from './stats.ts'
-import { evidencePack, type AttributionEvidence, type TurnAttribution } from './attribution.ts'
+import { evidencePack, type AttributionEvidence } from './attribution.ts'
 import { ALL_SIGNALS } from './attribution-signals.ts'
 import { PROBES } from './probes.ts'
 import { GROUPS, PATTERNS, type Group, type Mode } from './keywords.ts'
 import type { HistoryState } from './session-store.ts'
-import type { ModelTesterPanelProps } from './slots.ts'
+import type { ModelTesterActions, ModelTesterPanelProps } from './slots.ts'
 import css from './ModelTesterPanel.module.css'
 
 /** Card width when expanded. */
@@ -88,7 +88,7 @@ function writeOpenPreference(open: boolean): void {
 }
 
 /** The panel: one element that morphs between chip (collapsed) and card (expanded). */
-export function ModelTesterPanel({ useStats, t }: ModelTesterPanelProps) {
+export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps) {
   const snap = useStats(state => state)
   const stats = snap.stats
   // Older host/plugin stores do not expose history metadata; preserve their
@@ -237,8 +237,6 @@ export function ModelTesterPanel({ useStats, t }: ModelTesterPanelProps) {
         <span>ModelTester</span>
         {attrTop !== undefined && attrTop.verdict !== 'none' ? (
           <span className={css.chipMode} data-attr={attrTop.verdict}>{t(`vendor.${attrTop.vendor}`)}</span>
-        ) : stats?.gray.verdict === 'likely' ? (
-          <span className={css.chipMode}>{t('attr.strength.strong')}</span>
         ) : mode === 'efficient' ? (
           <span className={css.chipMode}>{t('mode.efficient')}</span>
         ) : mode === 'hesitant' ? (
@@ -264,6 +262,7 @@ export function ModelTesterPanel({ useStats, t }: ModelTesterPanelProps) {
           t={t}
           stats={stats}
           sessionId={snap.sessionId}
+          actions={actions}
           loading={snap.loading}
           historyState={historyState}
           historyPages={historyPages}
@@ -280,6 +279,7 @@ function PanelCard({
   t,
   stats,
   sessionId,
+  actions,
   loading,
   historyState,
   historyPages,
@@ -289,6 +289,7 @@ function PanelCard({
   t: ModelTesterPanelProps['t']
   stats: TrajectoryStats | null
   sessionId: string | undefined
+  actions?: ModelTesterActions
   loading: boolean
   historyState: HistoryState
   historyPages: number
@@ -320,7 +321,7 @@ function PanelCard({
               <HistoryNotice state={historyState} pages={historyPages} t={t} />
             )}
             <AttributionSection stats={stats} sessionId={sessionId} t={t} />
-            <ProbesSection t={t} />
+            <ProbesSection t={t} actions={actions} />
             {stats.anomaly !== 'none' ? (
               <ReasoningAlert stats={stats} t={t} />
             ) : (
@@ -422,35 +423,25 @@ const ATTR_DOCS_HREF = 'https://github.com/Yuer6327/ModelTester#attribution'
 /** Rationale lookup for the evidence-row tooltips. */
 const SIGNAL_RATIONALE: ReadonlyMap<string, string> = new Map(ALL_SIGNALS.map(signal => [signal.id, signal.rationale]))
 
-function pct(value: number): string {
-  return `${Math.round(value * 100)}%`
+/** Evidence-row accent by weight tier (bright state tokens). */
+const TIER_ACCENT: Readonly<Record<number, string>> = {
+  1: 'var(--dsw-alias-brand-primary)',
+  2: 'var(--dsw-alias-state-warn-primary)',
+  3: 'var(--dsw-alias-label-secondary)',
 }
 
-function wordLen(value: number): string {
-  return value === 0 ? '0' : value.toFixed(1)
-}
-
-/** Human milliseconds: 830ms / 6.2s; em-dash when unknown. */
-function ms(value: number | null): string {
-  if (value === null || !Number.isFinite(value)) return '—'
-  if (value >= 10_000) return `${(value / 1000).toFixed(1)}s`
-  return `${Math.round(value)}ms`
-}
-
-/** Session attribution ranking + evidence ledger, with the gray-signal strength line. */
+/** Session attribution ranking + the full evidence ledger. */
 function AttributionSection({ stats, sessionId, t }: {
   stats: NonNullable<TrajectoryStats>
   sessionId: string | undefined
   t: ModelTesterPanelProps['t']
 }) {
   const attr = stats.attribution
-  const gray = stats.gray
-  const strength = gray.verdict === 'likely' ? 'strong' : gray.verdict === 'possible' ? 'weak' : 'none'
   const [exported, setExported] = useState(false)
 
   const exportEvidence = async (): Promise<void> => {
     try {
-      const pack = evidencePack(attr, { sessionId, gray })
+      const pack = evidencePack(attr, { sessionId })
       await navigator.clipboard.writeText(JSON.stringify(pack, null, 2))
       setExported(true)
       setTimeout(() => setExported(false), 1200)
@@ -463,14 +454,11 @@ function AttributionSection({ stats, sessionId, t }: {
     <section className={css.section} data-attr={attr.verdict}>
       <div className={css.modeRow}>
         <h3 className={css.modeLabel}>{t('attr.label')}</h3>
-        <span className={css.grayBadge} data-attr={attr.verdict}>
+        <span className={css.attrBadge} data-attr={attr.verdict}>
           {t(`attr.${attr.verdict}`)}
         </span>
-        <span className={css.grayBadge}>
-          {t('attr.strength')} {t(`attr.strength.${strength}`)}
-        </span>
         <a
-          className={css.grayDocs}
+          className={css.attrDocs}
           href={ATTR_DOCS_HREF}
           target="_blank"
           rel="noreferrer"
@@ -483,29 +471,11 @@ function AttributionSection({ stats, sessionId, t }: {
           {exported ? t('attr.copied') : t('attr.export')}
         </button>
       </div>
-      <div className={css.metrics}>
-        <span className={css.metric}>
-          {t('gray.imDoing')} <b className={css.metricValue}>{gray.imDoing}</b>
-        </span>
-        <span className={css.metric}>
-          {t('gray.list')} <b className={css.metricValue}>{pct(gray.style.listRatio)}</b>
-        </span>
-        <span className={css.metric}>
-          {t('gray.p50')} <b className={css.metricValue}>{gray.style.p50}</b>
-        </span>
-        <span className={css.metric}>
-          {t('gray.ttr')} <b className={css.metricValue}>{pct(gray.style.typeToken)}</b>
-        </span>
-        <span className={css.metric}>
-          {t('gray.avgWord')} <b className={css.metricValue}>{wordLen(gray.style.avgWordLen)}</b>
-        </span>
-        {gray.slowTtft && <span className={css.metric}>{t('gray.ttft')}↑</span>}
-      </div>
       {attr.candidates.length === 0 ? (
         <p className={css.empty}>{t('attr.empty')}</p>
       ) : (
         <div className={css.patternList}>
-          {attr.candidates.slice(0, 3).map(candidate => (
+          {attr.candidates.map(candidate => (
             <span className={css.patternItem} data-attr={candidate.verdict} key={candidate.vendor}>
               <span className={css.patternDot} data-attr={candidate.verdict} aria-hidden="true" />
               <span className={css.patternKey}>{t(`vendor.${candidate.vendor}`)}</span>
@@ -519,30 +489,23 @@ function AttributionSection({ stats, sessionId, t }: {
       )}
       {attr.evidence.length > 0 && (
         <div className={css.patternList}>
-          {attr.evidence.slice(0, 8).map(entry => (
+          {attr.evidence.map(entry => (
             <EvidenceRow key={entry.id} entry={entry} t={t} />
           ))}
         </div>
       )}
       {attr.unattributed.length > 0 && (
-        <p className={css.grayFacts}>
+        <p className={css.leakFacts}>
           {t('attr.unattributed')}
           {attr.unattributed.slice(0, 4).map(entry => {
             const sample = entry.samples[0]
             return (
-              <code className={css.grayCode} key={entry.id}>
+              <code className={css.leakCode} key={entry.id}>
                 {sample !== undefined ? sample : t(`attr.signal.${entry.id}`)}
               </code>
             )
           })}
         </p>
-      )}
-      {attr.turns.length > 1 && (
-        <div className={css.patternList}>
-          {attr.turns.map((turn, index) => (
-            <AttrTurnRow key={index} turn={turn} t={t} />
-          ))}
-        </div>
       )}
     </section>
   )
@@ -555,65 +518,76 @@ function EvidenceRow({ entry, t }: { entry: AttributionEvidence; t: ModelTesterP
   const title = sample !== undefined ? `${rationale} — ${sample}` : rationale
   return (
     <span className={css.patternItem} title={title}>
-      <span className={css.patternDot} data-tier={entry.tier} aria-hidden="true" />
+      <span
+        className={css.patternDot}
+        style={{ background: TIER_ACCENT[entry.tier] }}
+        aria-hidden="true"
+      />
       <span className={css.patternKey}>{t(`attr.signal.${entry.id}`)}</span>
       <span className={css.patternCount}>×{entry.count}</span>
     </span>
   )
 }
 
-/** One per-turn line: turn number, best-supported vendor, new-evidence count, TTFT. */
-function AttrTurnRow({ turn, t }: { turn: TurnAttribution; t: ModelTesterPanelProps['t'] }) {
-  const label = turn.live ? 'live' : `T${Number.isFinite(turn.turn) && turn.turn >= 0 ? turn.turn : '?'}`
-  return (
-    <span className={css.patternItem}>
-      <span className={css.patternDot} aria-hidden="true" />
-      <span className={css.patternKey}>
-        {label}{turn.top !== null ? ` · ${t(`vendor.${turn.top}`)}` : ''}
-      </span>
-      <span className={css.patternCount}>
-        {turn.newTokens.length > 0 ? `+${turn.newTokens.length}` : ''}
-        {turn.ttftMs !== null ? ` · TTFT ${ms(turn.ttftMs)}` : ''}
-      </span>
-    </span>
-  )
-}
-
-/** Probe kit: copyable prompts; the model's replies are scanned passively. */
-function ProbesSection({ t }: { t: ModelTesterPanelProps['t'] }) {
+/** Probe kit: one-click send into a fresh session (copy as fallback). */
+function ProbesSection({ t, actions }: { t: ModelTesterPanelProps['t']; actions?: ModelTesterActions }) {
   return (
     <section className={css.section}>
       <div className={css.modeRow}>
         <h3 className={css.modeLabel}>{t('attr.probes')}</h3>
-        <span className={css.grayBadge}>{t('attr.probesHint')}</span>
+        <span className={css.attrBadge}>{t('attr.probesHint')}</span>
       </div>
       <div className={css.patternList}>
         {PROBES.map(probe => (
-          <ProbeRow key={probe.id} probe={probe} t={t} />
+          <ProbeRow key={probe.id} probe={probe} t={t} actions={actions} />
         ))}
       </div>
     </section>
   )
 }
 
-/** One probe row with a copy-to-clipboard button. */
-function ProbeRow({ probe, t }: { probe: (typeof PROBES)[number]; t: ModelTesterPanelProps['t'] }) {
-  const [copied, setCopied] = useState(false)
+/** One probe row: send into a fresh session when the host face allows, else copy. */
+function ProbeRow({ probe, t, actions }: {
+  probe: (typeof PROBES)[number]
+  t: ModelTesterPanelProps['t']
+  actions?: ModelTesterActions
+}) {
+  const canSend = typeof actions?.sendProbe === 'function'
+  const [feedback, setFeedback] = useState('')
+
+  const send = async (): Promise<void> => {
+    if (actions?.sendProbe === undefined) return
+    try {
+      const result = await actions.sendProbe(probe.prompt)
+      setFeedback(result.ok ? t('attr.sent') : t('attr.sendFail'))
+    } catch {
+      setFeedback(t('attr.sendFail'))
+    }
+    setTimeout(() => setFeedback(''), 1600)
+  }
+
   const copy = async (): Promise<void> => {
     try {
       await navigator.clipboard.writeText(probe.prompt)
-      setCopied(true)
-      setTimeout(() => setCopied(false), 1200)
+      setFeedback(t('attr.copied'))
+      setTimeout(() => setFeedback(''), 1200)
     } catch {
       /* clipboard unavailable: non-fatal */
     }
   }
+
   return (
     <span className={css.patternItem} title={t(`attr.probe.${probe.id}.note`)}>
       <span className={css.patternKey}>{t(`attr.probe.${probe.id}`)}</span>
-      <button type="button" className={css.probeBtn} onClick={() => { void copy() }}>
-        {copied ? t('attr.copied') : t('attr.copy')}
-      </button>
+      {canSend ? (
+        <button type="button" className={css.probeBtn} onClick={() => { void send() }}>
+          {feedback !== '' ? feedback : t('attr.send')}
+        </button>
+      ) : (
+        <button type="button" className={css.probeBtn} onClick={() => { void copy() }}>
+          {feedback !== '' ? feedback : t('attr.copy')}
+        </button>
+      )}
     </span>
   )
 }

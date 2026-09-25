@@ -20,15 +20,6 @@ export type {
   BlockCounts, PatternCounts, ReasoningAnomaly, SessionCounts, TrajectoryStats, WordCounts,
 } from './stats.ts'
 export {
-  GRAYTEST_VERSION, emptyGrayProbe, isSlowTtft, probeGraySession, scoreTurn,
-} from './graytest.ts'
-export type {
-  GrayEvidence, GrayProbe, GrayProfile, GrayVerdict, StyleStats, TurnProbe, TurnTiming,
-} from './graytest.ts'
-export {
-  DIRTY_TOKENS, FINGERPRINT_RE, IM_DOING_RE, LIST_LINE_RE, OPENERS,
-} from './gray-signals.ts'
-export {
   ATTRIBUTION_VERSION, attributeSession, attributionTurnCacheFor, emptyAttribution, evidencePack, scanNode,
 } from './attribution.ts'
 export type {
