@@ -103,7 +103,7 @@
   position: absolute;
   top: 0;
   left: 0;
-  width: 300px;
+  width: 320px;
   max-height: var(--modeltester-max);
   display: flex;
   flex-direction: column;
@@ -286,6 +286,106 @@
 
 .section {
   margin-bottom: 14px;
+}
+
+/* --- attribution candidates, ordered by confidence --- */
+
+.candidate {
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.candidate[data-attr='likely'] {
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.candidate[data-attr='possible'] {
+  border-color: var(--dsw-alias-state-warn-primary);
+}
+
+.candidateHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 5px;
+}
+
+.candidateRank {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--dsw-alias-label-secondary);
+  color: var(--dsw-alias-label-primary-inverted);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.candidate[data-attr='likely'] .candidateRank {
+  background: var(--dsw-alias-brand-primary);
+}
+
+.candidate[data-attr='possible'] .candidateRank {
+  background: var(--dsw-alias-state-warn-primary);
+}
+
+.candidateName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 18px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.candidateScore {
+  flex: none;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.candidateScore b {
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+}
+
+.confidenceBar {
+  height: 3px;
+  margin-bottom: 6px;
+  border-radius: 999px;
+  background: var(--dsw-alias-border-l2);
+  overflow: hidden;
+}
+
+.confidenceBar span {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--dsw-alias-label-secondary);
+}
+
+.candidate[data-attr='likely'] .confidenceBar span {
+  background: var(--dsw-alias-brand-primary);
+}
+
+.candidate[data-attr='possible'] .confidenceBar span {
+  background: var(--dsw-alias-state-warn-primary);
+}
+
+.candidateEvidence {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .modeRow {

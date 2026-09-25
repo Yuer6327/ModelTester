@@ -29,7 +29,7 @@ import type { ModelTesterActions, ModelTesterPanelProps } from './slots.ts'
 import css from './ModelTesterPanel.module.css'
 
 /** Card width when expanded. */
-const CARD_W = 300
+const CARD_W = 320
 /** Collapsed chip height. */
 const CHIP_H = 36
 /** Collapsed chip corner radius (a rounded rectangle, not a pill). */
@@ -430,7 +430,7 @@ const TIER_ACCENT: Readonly<Record<number, string>> = {
   3: 'var(--dsw-alias-label-secondary)',
 }
 
-/** Session attribution ranking + the full evidence ledger. */
+/** Session attribution ranking: candidates ordered by confidence, evidence grouped under each. */
 function AttributionSection({ stats, sessionId, t }: {
   stats: NonNullable<TrajectoryStats>
   sessionId: string | undefined
@@ -438,6 +438,7 @@ function AttributionSection({ stats, sessionId, t }: {
 }) {
   const attr = stats.attribution
   const [exported, setExported] = useState(false)
+  const totalScore = attr.candidates.reduce((sum, c) => sum + c.score, 0)
 
   const exportEvidence = async (): Promise<void> => {
     try {
@@ -474,25 +475,34 @@ function AttributionSection({ stats, sessionId, t }: {
       {attr.candidates.length === 0 ? (
         <p className={css.empty}>{t('attr.empty')}</p>
       ) : (
-        <div className={css.patternList}>
-          {attr.candidates.map(candidate => (
-            <span className={css.patternItem} data-attr={candidate.verdict} key={candidate.vendor}>
-              <span className={css.patternDot} data-attr={candidate.verdict} aria-hidden="true" />
-              <span className={css.patternKey}>{t(`vendor.${candidate.vendor}`)}</span>
-              <span className={css.patternCount}>
-                {candidate.score}
-                {candidate.verdict !== 'none' ? ` · ${t(`attr.${candidate.verdict}`)}` : ''}
-              </span>
-            </span>
-          ))}
-        </div>
-      )}
-      {attr.evidence.length > 0 && (
-        <div className={css.patternList}>
-          {attr.evidence.map(entry => (
-            <EvidenceRow key={entry.id} entry={entry} t={t} />
-          ))}
-        </div>
+        attr.candidates.map((candidate, rank) => {
+          const own = attr.evidence.filter(entry => entry.vendor === candidate.vendor)
+          const share = totalScore > 0 ? Math.round((candidate.score / totalScore) * 100) : 0
+          return (
+            <div className={css.candidate} data-attr={candidate.verdict} key={candidate.vendor}>
+              <div className={css.candidateHead}>
+                <span className={css.candidateRank} aria-hidden="true">{rank + 1}</span>
+                <span className={css.candidateName}>{t(`vendor.${candidate.vendor}`)}</span>
+                <span className={css.candidateScore}>
+                  <b>{candidate.score}</b>
+                  {' '}
+                  {share}%
+                  {candidate.verdict !== 'none' ? ` · ${t(`attr.${candidate.verdict}`)}` : ''}
+                </span>
+              </div>
+              <div className={css.confidenceBar} aria-hidden="true">
+                <span style={{ width: `${Math.max(4, share)}%` }} />
+              </div>
+              {own.length > 0 && (
+                <div className={css.candidateEvidence}>
+                  {own.map(entry => (
+                    <EvidenceRow key={entry.id} entry={entry} t={t} />
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })
       )}
       {attr.unattributed.length > 0 && (
         <p className={css.leakFacts}>

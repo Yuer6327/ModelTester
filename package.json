@@ -1,6 +1,6 @@
 {
   "name": "dsh-modeltester",
-  "version": "0.0.5-alpha.1",
+  "version": "0.0.5-alpha.2",
   "description": "ModelTester — model detection & attribution panel for the DeepSeek Harness web chat. Ranks vendor families (DeepSeek / Anthropic / OpenAI / Google / Qwen / GLM / Kimi / MiniMax / Llama / Mistral / Ling) from structural fingerprints — template & tokenizer leaks, dirty tokens, trajectory vocabulary, probe canaries — with a full evidence ledger, gray-test signal detection, and a usage-delta fertility drill for quantitative tokenizer identification.",
   "type": "module",
   "main": "lib/index.js",
