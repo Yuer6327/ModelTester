@@ -25,8 +25,8 @@ export interface TokenizerFeatureSet {
 export const TOKENIZER_FEATURE_SETS: readonly TokenizerFeatureSet[] = [
   {
     vendor: 'deepseek',
-    model: 'DeepSeek-V3.2',
-    source: 'deepseek-ai/DeepSeek-V3.2',
+    model: 'DeepSeek-V4.1-Flash / V3.x',
+    source: 'deepseek-ai/DeepSeek-V4.1-Flash',
     tokens: ['<｜begin▁of▁sentence｜>', '<｜end▁of▁sentence｜>', '<｜User｜>', '<｜Assistant｜>', '<｜tool▁calls▁begin｜>'],
   },
   {
@@ -43,15 +43,15 @@ export const TOKENIZER_FEATURE_SETS: readonly TokenizerFeatureSet[] = [
   },
   {
     vendor: 'moonshot',
-    model: 'Kimi-K2-Thinking',
-    source: 'moonshotai/Kimi-K2-Thinking',
-    tokens: ['<|im_middle|>', '<|im_user|>', '<|im_assistant|>', '<|im_system|>', '<|tool_calls_section_begin|>', '<|tool_call_begin|>'],
+    model: 'Kimi-K3 / K2-Thinking',
+    source: 'moonshotai/Kimi-K3',
+    tokens: ['<|end_of_msg|>', '<|open|>', '<|close|>', '<|sep|>', '[start_header_id]', '[end_header_id]', '<osagent_mode>', '<|media_begin|>', '<|im_middle|>', '<|im_user|>', '<|im_assistant|>', '<|tool_calls_section_begin|>'],
   },
   {
     vendor: 'minimax',
-    model: 'MiniMax-M2.1',
-    source: 'MiniMaxAI/MiniMax-M2.1',
-    tokens: ['<minimax:tool_call>', '</minimax:tool_call>', ']<]image[>[', ']<]speech[>[', ']<]video[>[', ']!p~[', '[e~['],
+    model: 'MiniMax-M3 / M2.1',
+    source: 'MiniMaxAI/MiniMax-M3',
+    tokens: ['<mm:think>', '</mm:think>', '<minimax:tool_call>', ']<]minimax[>[', ']<]frame[>[', ']<]image[>[', '<|content_altered_placeholder|>', ']!p~[', '[e~['],
   },
   {
     vendor: 'meta',
