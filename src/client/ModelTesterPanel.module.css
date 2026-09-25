@@ -70,11 +70,11 @@
   background: var(--dsw-alias-label-secondary);
 }
 
-.chipDot[data-gray='likely'] {
+.chipDot[data-attr='likely'] {
   background: var(--dsw-alias-brand-primary);
 }
 
-.chipDot[data-gray='possible'] {
+.chipDot[data-attr='possible'] {
   background: var(--dsw-alias-state-warn-primary);
 }
 
@@ -83,11 +83,11 @@
   font-weight: 400;
 }
 
-.chipMode[data-gray='likely'] {
+.chipMode[data-attr='likely'] {
   color: var(--dsw-alias-brand-primary);
 }
 
-.chipMode[data-gray='possible'] {
+.chipMode[data-attr='possible'] {
   color: var(--dsw-alias-state-warn-label);
 }
 
@@ -318,15 +318,15 @@
   color: var(--dsw-alias-label-secondary);
 }
 
-.grayBadge[data-gray='likely'] {
+.grayBadge[data-attr='likely'] {
   color: var(--dsw-alias-brand-primary);
 }
 
-.grayBadge[data-gray='possible'] {
+.grayBadge[data-attr='possible'] {
   color: var(--dsw-alias-state-warn-label);
 }
 
-.grayBadge[data-gray='miss'] {
+.grayBadge[data-attr='none'] {
   color: var(--dsw-alias-label-tertiary);
 }
 
@@ -375,12 +375,48 @@
   line-height: 18px;
 }
 
-.patternDot[data-gray='likely'] {
+.patternDot[data-attr='likely'] {
   background: var(--dsw-alias-brand-primary);
 }
 
-.patternDot[data-gray='possible'] {
+.patternDot[data-attr='possible'] {
   background: var(--dsw-alias-state-warn-primary);
+}
+
+.patternDot[data-tier='1'] {
+  background: var(--dsw-alias-brand-primary);
+}
+
+.patternDot[data-tier='2'] {
+  background: var(--dsw-alias-state-warn-primary);
+}
+
+.patternDot[data-tier='3'] {
+  background: var(--dsw-alias-label-secondary);
+}
+
+/* copyable probe prompt / evidence-pack button (pill, quiet) */
+
+.probeBtn {
+  flex: none;
+  padding: 1px 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.probeBtn:hover {
+  color: var(--dsw-alias-label-primary);
+  border-color: var(--dsw-alias-label-secondary);
+}
+
+.probeBtn:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
 }
 
 .sectionLabel {

@@ -17,7 +17,7 @@ ModelTester 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harne
 | 🟠 犹豫 · 第一人称试探 | `Let me…` `I think…` `I'm not sure…` `I wonder…` `I guess…` `maybe` `perhaps` | standard 类低分轨迹 |
 | ⚪ 中性 · 复述任务 | `The user wants…` `The user asked…` `this task…` `the request…` | Standard 目录开场框架 |
 
-**灰测**是另一层、不改 0813 词表。面板只报命中态与数字；完整判定规则见 [灰测如何判定](#gray-test)。
+**归属分析**是主视图：把脏 token、后端泄漏串、轨迹词汇等结构指纹映射到厂商候选（DeepSeek 系 / Anthropic 系 / OpenAI 系 / Google / Qwen / GLM / Kimi），输出带证据账本的排名；**灰测**降级为其中的「灰测特征」强度行。判定规则见 [归属分析](#attribution) 与 [灰测如何判定](#gray-test)。
 
 面板是原生融入的悬浮层：复用 harness 设计系统（`--dsw-alias-*` 语义令牌、DetailsPanel 头/体结构、CSS Modules、明暗与 reduced-motion），通过官方 `shell.overlay` 插槽挂载，不改动、不补丁任何既有 UI。
 
@@ -133,6 +133,29 @@ TTFT 仍只作 +1 弱加分，原始数字与画像始终显示——判断留�
 
 更短的矩阵与 0813 对照见 [`docs/research.md`](docs/research.md)。
 
+## <a id="attribution"></a>归属分析（attribution）
+
+**一句话**：扫描全部已加载推理文本（探针哨兵顺带扫可见回复），把命中的结构指纹按权重累到厂商候选上；候选达到「匹配」需要至少一条 **tier-1** 证据且明显领先第二名，仅 tier-2/3 证据封顶「疑似」，只有无厂商证据时显示「未匹配」并列出泄漏物。这是**结构指纹匹配**，不是身份断言。
+
+证据表（[`src/client/attribution-signals.ts`](src/client/attribution-signals.ts)，`ATTRIBUTION_VERSION = 1`；引擎 [`attribution.ts`](src/client/attribution.ts)）分层：
+
+| 层 | 证据 | 厂商 | 权重 |
+|---|---|---|---:|
+| 1 · 基础设施泄漏 | `antml` 命名空间（工具调用 XML 漏进推理） | Anthropic 系 | 6 |
+| 1 | `fp_v4pro_…` 部署串（社区观测于灰测会话） | DeepSeek 系 | 5 |
+| 1 | 其他 `fp_…` 串（OpenAI 风格 API 指纹） | OpenAI 系 | 4 |
+| 2 · 轨迹词汇 | 0813 Minimal（`we need`/`let's` 且零 `let me`）与 Standard（`let me` 沉重）指纹 | DeepSeek 系 | 3 |
+| 2 · 已证实脏 token | `EDMFunc`、`everydaycalculation`、`Nameeee`（厂商未定） | 未归属 | — |
+| 2 · 异常探测器 | 未收录 XML 标签、长十六进制串、`EDMFunc` 样后端标识、退化重复 | 未归属 | — |
+| 3 · 风格轶事/探针 | `delve` 词癖、破折号密度（≥3/千字）、glitch 金丝雀、探针哨兵回声 | 弱支持 | 1 |
+
+- **异常探测器**抓的是表里还没有的泄漏物：命中进「未归属」账本，附 ±40 字上下文样本，可直接抄给社区、一行入表。
+- **证据账本**按信号去重、封顶 40 条，每条带首现轮次与样本；逐轮行显示当轮最像的厂商与新增证据数。
+- **探针包**（面板底部，一键复制）：glitch token 电池（`SolidGoldMagikarp` 等金丝雀）、不可见字符回声电池、字母计数、知识截止探针。插件无法替你发消息（宿主契约只读）——复制后手动发到目标会话，模型回复由引擎被动扫描；哨兵回声记入账本，**复述是否退化请人工判断**（面板注有判断要点）。
+- **证据包导出**：归属区一键复制 JSON（候选、证据、灰测特征、会话 id），纯本地、零网络。
+
+**诚实边界**：结构指纹 ≠ 模型身份。`antml` 这类工件可能来自**脚手架**而非底座模型（Claude 系脚手架包裹任意底座都会漏 antml）；轨迹词汇是 DeepSeek 后训练/脚手架层面的指纹；风格标记是社区轶事级证据，checkpoint 漂移会改变风格。归属排名回答「像谁」，不回答「是谁」。
+
 ## 安装
 
 **前置条件**：已安装 dsh CLI ≥ **0.1.0-rc.7**（`dsh --version`），并已建好目标 profile。ModelTester 按 dsh **0.1.x** 的客户端契约构建：同时兼容 **rc.7、rc.8、0.1.1-rc.x、0.1.2-rc.1、0.1.3-alpha.x、0.1.5-rc.x、0.1.6-alpha.1，以及 0.1.7 全线（alpha.1、alpha.2、rc.1、rc.2）**。更早的 rc 版本未保证兼容。逐版本的精确兼容声明（DSH STORE `dsh.compatibility.dshReleases` 矩阵）以本仓库 `package.json` 为准：0.1.6-alpha.1 与 0.1.7-rc.1 为真实 Profile 实测，0.1.7-alpha.1、0.1.7-alpha.2、0.1.7-rc.2 为静态契约探针实测（平台种子表、`shell.overlay`、`chat.legacy` 切片、SessionFace 四项逐版本比对通过）。
@@ -187,7 +210,7 @@ dsh web --patch 'D:/OneDrive/桌面/play/codes/dsh-plugin/ModelTester/cordis.pat
 ## 使用
 
 - 面板停靠于会话标题栏下方右上角（避开「Session log」下载按钮），浮在对话框上。
-- **折叠**时是圆角胶囊（圆点 + "ModelTester" + 模式；灰测命中/疑似时改显示该态）。**展开**后：状态条、灰测（命中态后有指向本 README [灰测如何判定](#gray-test) 的 `?` 链接，数字始终显示）、轨迹模式、占比条、`we · let's · let me · I`、关键词明细、犹豫压力。方法说明不进面板。
+- **折叠**时是圆角胶囊（圆点 + "ModelTester" + 当前最像厂商；灰测特征强或轨迹模式时显示对应态）。**展开**后：状态条、归属排名与证据账本（带指向 [归属分析](#attribution) 的 `?` 链接与证据包导出）、灰测特征行与风格数字、轨迹模式、占比条、`we · let's · let me · I`、关键词明细、探针包、犹豫压力。方法说明不进面板。
 - 胶囊↔卡片是同一表面的临界阻尼弹簧形变（可打断、锚定右 dock），`prefers-reduced-motion` 下降级为瞬时切换；开合状态会被记住。
 
 ### 数据口径、持久化与隐私

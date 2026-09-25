@@ -17,6 +17,7 @@
  */
 
 import type { AssistantBlockView, ConversationView } from './conversation.ts'
+import { attributeSession, emptyAttribution, type AttributionReport } from './attribution.ts'
 import { emptyGrayProbe, probeGraySession, type GrayProbe } from './graytest.ts'
 import {
   FIRST_TOKEN_ORDER, GROUPS, LATER_TOKEN_ORDER, PATTERNS, type Group, type Mode,
@@ -102,6 +103,12 @@ export interface TrajectoryStats {
    * 0813 session classifier.
    */
   readonly gray: GrayProbe
+  /**
+   * Vendor-attribution report over the same surface: ranked candidates plus
+   * the per-signal evidence ledger (structural fingerprints — never an
+   * identity claim).
+   */
+  readonly attribution: AttributionReport
 }
 
 const EMPTY_COUNTS: BlockCounts = {
@@ -251,12 +258,14 @@ export function anomalyOf(
  * @param streaming - whether a turn is streaming.
  * @param diagnostics - visible-text totals used for the anomaly grade.
  * @param gray - session-wide gray-test probe (defaults to empty).
+ * @param attribution - vendor-attribution report (defaults to empty).
  */
 export function toTrajectoryStats(
   counts: SessionCounts,
   streaming: boolean,
   diagnostics: { textBlocks: number; textChars: number },
   gray: GrayProbe = emptyGrayProbe(),
+  attribution: AttributionReport = emptyAttribution(),
 ): TrajectoryStats {
   const groups = {} as Record<Group, number>
   for (const group of GROUPS) {
@@ -296,6 +305,7 @@ export function toTrajectoryStats(
     mode,
     hesitation,
     gray,
+    attribution,
   }
 }
 
@@ -325,11 +335,13 @@ export function computeStats(snapshot: ConversationView | undefined): Trajectory
   if (snapshot.partial !== null) {
     for (const block of snapshot.partial.blocks) fold(block)
   }
+  const gray = probeGraySession(snapshot)
   return toTrajectoryStats(
     counts,
     snapshot.partial !== null,
     { textBlocks, textChars },
-    probeGraySession(snapshot),
+    gray,
+    attributeSession(snapshot, { words: counts.words, patterns: counts.patterns }),
   )
 }
 

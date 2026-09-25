@@ -29,6 +29,18 @@ export {
   DIRTY_TOKENS, FINGERPRINT_RE, IM_DOING_RE, LIST_LINE_RE, OPENERS,
 } from './gray-signals.ts'
 export {
+  ATTRIBUTION_VERSION, attributeSession, attributionTurnCacheFor, emptyAttribution, evidencePack, scanNode,
+} from './attribution.ts'
+export type {
+  AttributionEvidence, AttributionReport, AttributionVerdict, TurnAttribution, VendorScore,
+} from './attribution.ts'
+export { ALL_SIGNALS, DERIVED_SIGNALS, SCANNED_SIGNALS, VENDORS } from './attribution-signals.ts'
+export type {
+  DerivedSignalId, EvidenceKind, EvidenceTier, SignalId, TrajectoryInput, Vendor,
+} from './attribution-signals.ts'
+export { PROBES } from './probes.ts'
+export type { ProbeEntry, ProbeId } from './probes.ts'
+export {
   EFFICIENT_PATTERNS, GROUPS, HESITANT_PATTERNS, KEYWORD_TAXONOMY_VERSION, NEUTRAL_PATTERNS, PATTERNS,
 } from './keywords.ts'
 export type { Group, KeywordPattern, Mode } from './keywords.ts'

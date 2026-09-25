@@ -622,6 +622,104 @@ The user is asking for a quick fix. I think the issue is in the config.
   check('gray: text I\'m doing not counted', textOnly.imDoing, 0)
 }
 
+// --- 13. Attribution engine: vendor ranking + evidence ledger ---
+{
+  const { attributeSession, emptyAttribution, evidencePack, scanNode } = await import('./src/client/attribution.ts')
+  const { countReasoningText } = await import('./src/client/stats.ts')
+  const trajOf = (text) => {
+    const c = countReasoningText(text)
+    return { words: c.words, patterns: c.patterns }
+  }
+  const zero = trajOf('')
+  const asNode = (text, turn = 1, extra = {}) => ({
+    kind: 'assistant', seq: turn, turn, time: 0,
+    blocks: [{ kind: 'reasoning', text }],
+    ...extra,
+  })
+  const viewOf = (nodes, partial = null) => ({
+    sessionId: 'a', nodes, partial, openState: 'open', hasMore: false, loadingOlder: false,
+  })
+
+  // antml namespace → anthropic, likely (tier-1, clear lead).
+  const antmlText = 'Checking the tool list. <antml:thinking> I should map the schema.'
+  const antml = attributeSession(viewOf([asNode(antmlText)]), zero)
+  check('attr: antml → anthropic top', antml.candidates[0]?.vendor, 'anthropic')
+  check('attr: antml session likely', antml.verdict, 'likely')
+  check('attr: antml ledger sample', (antml.evidence.find(e => e.id === 'antml-ns')?.samples.length ?? 0) >= 1, true)
+
+  // fp_v4pro_… → deepseek; generic fp_ → openai.
+  const v4 = attributeSession(viewOf([asNode('fp_v4pro_20260812_prod leaked in the chain.')]), zero)
+  check('attr: fp_v4pro → deepseek likely', v4.candidates[0]?.vendor === 'deepseek' && v4.verdict === 'likely', true)
+  const fpg = attributeSession(viewOf([asNode('the trace said fp_abc123def0 twice: fp_abc123def0')]), zero)
+  check('attr: fp_ → openai likely', fpg.candidates[0]?.vendor === 'openai' && fpg.verdict === 'likely', true)
+
+  // 0813 minimal trajectory → deepseek possible (tier-2 caps below likely).
+  const minimalText = "We need to inspect the layout. Let's check the config. We should run the tests."
+  const minimal = attributeSession(viewOf([asNode(minimalText)]), trajOf(minimalText))
+  check('attr: 0813 minimal → deepseek top', minimal.candidates[0]?.vendor, 'deepseek')
+  check('attr: 0813 minimal possible (tier-2 cap)', minimal.candidates[0]?.verdict, 'possible')
+  check('attr: 0813 minimal no foreign vendor', minimal.candidates.every(c => c.vendor === 'deepseek'), true)
+
+  // Unattributed dirty token → ledger without vendor; verdict none; anomaly
+  // detector must not double-count the recorded token.
+  const unknown = attributeSession(viewOf([asNode('EDMFunc showed up mid-plan.')]), zero)
+  check('attr: EDMFunc unattributed', unknown.unattributed.some(e => e.id === 'edm-func'), true)
+  check('attr: unattributed verdict none', unknown.verdict, 'none')
+  check('attr: EDMFunc not double-counted by anomaly detector', unknown.evidence.some(e => e.id === 'anom-ident'), false)
+
+  // Probe sentinels are scanned over visible text too.
+  const probe = attributeSession(viewOf([{
+    kind: 'assistant', seq: 1, turn: 1,
+    blocks: [{ kind: 'text', text: 'SolidGoldMagikarp\nMT-ECHO-7f3a9c' }],
+  }]), zero)
+  check('attr: glitch canary (visible text)', probe.evidence.some(e => e.id === 'probe-gpt2-glitch'), true)
+  check('attr: echo sentinel (visible text)', probe.evidence.some(e => e.id === 'probe-echo'), true)
+
+  // Anomaly detectors catch unrecorded leaks (unknown namespaced tag, hex run).
+  const anom = attributeSession(viewOf([asNode('<sys:internal> route via deadbeefdeadbeefcafe deadbeefdeadbeefcafe')]), zero)
+  check('attr: unknown namespaced tag flagged', anom.evidence.some(e => e.id === 'anom-ns-tag'), true)
+  check('attr: hex run flagged', anom.evidence.some(e => e.id === 'anom-hex'), true)
+
+  // Per-turn rows: first-seen evidence is new, later repeats are not.
+  const mixed = attributeSession(viewOf([
+    asNode('Let me think about it. Let me check again.', 1),
+    asNode('<antml:thinking> ok', 2),
+    asNode('<antml:thinking> again', 3),
+  ]), zero)
+  check('attr: turn2 new token antml-ns', mixed.turns[1]?.newTokens.includes('antml-ns'), true)
+  check('attr: turn3 antml no longer new', mixed.turns[2]?.newTokens.includes('antml-ns'), false)
+  check('attr: turn2 top anthropic', mixed.turns[1]?.top, 'anthropic')
+
+  // Style folklore: delve (presence) and em-dash density (≥3/1000 chars).
+  const delve = attributeSession(viewOf([asNode('We should delve into the config to be sure.')]), zero)
+  check('attr: delve style row', delve.evidence.some(e => e.id === 'style-delve'), true)
+  const dash = attributeSession(viewOf([asNode('a — b — c — d'.repeat(40))]), zero)
+  check('attr: em-dash density row', dash.evidence.some(e => e.id === 'style-emdash'), true)
+  check('attr: no attribution on plain 0813 text is deepseek-only', attributeSession(
+    viewOf([asNode("We need to check the build. Let's proceed with the plan.")]),
+    trajOf("We need to check the build. Let's proceed with the plan."),
+  ).candidates.every(c => c.vendor === 'deepseek'), true)
+
+  // computeStats wires the report into TrajectoryStats; empty stays empty.
+  const { computeStats } = await import('./src/client/stats.ts')
+  const wired = computeStats(viewOf([asNode('<antml:thinking> go')]))
+  check('attr: computeStats carries attribution', wired?.attribution.verdict, 'likely')
+  check('attr: no snapshot → null stats', computeStats(undefined), null)
+  check('attr: emptyAttribution is none', emptyAttribution().verdict, 'none')
+
+  // Evidence pack is plain JSON-ready data.
+  const pack = evidencePack(antml, {
+    sessionId: 's-attr',
+    gray: { verdict: 'miss', profile: 'none', imDoing: 0, dirtyTokens: [], fingerprints: [] },
+  })
+  check('attr: evidence pack json', typeof JSON.stringify(pack), 'string')
+  check('attr: evidence pack verdict', pack.verdict, 'likely')
+
+  // scanNode is exported and pure for external use.
+  const scanned = scanNode([{ kind: 'reasoning', text: '<antml:thinking>' }], 1, null)
+  check('attr: scanNode finds antml', scanned.hits.some(h => h.id === 'antml-ns'), true)
+}
+
 console.log(failures === 0 ? '\nAll checks passed ✓' : `\n${failures} check(s) FAILED ✗`)
 // Let pending dynamic-import module jobs settle before exiting (avoids a
 // Windows libuv teardown race that otherwise asserts in win/async.c).
