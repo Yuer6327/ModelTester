@@ -1,0 +1,11 @@
+{
+  "comment": "Fixed probe texts for usage-delta fertility fingerprinting. T0 is the baseline; deltas T_n - T0 eliminate the constant chat-template overhead the gateway adds. Diverse scripts maximize tokenizer divergence.",
+  "texts": {
+    "T0": "Hi.",
+    "T1": "The ERESOLVE error appears because pnpm cannot reconcile the peer-dependency ranges declared by the two plugins; resolution therefore backtracks until it exceeds the configured retry budget and aborts the install.",
+    "T2": "The ERESOLVE error appears because pnpm cannot reconcile the peer-dependency ranges declared by the two plugins; resolution therefore backtracks until it exceeds the configured retry budget and aborts the install。而中文分词的粒度与英文显著不同：词与词之间没有空格，标点符号使用全角形式，例如「模型家族检测」和分词器的Token化策略。",
+    "T3": "if (x[0] === \"a\" && y!.bar) { console.log(`${z}: ${JSON.stringify(w?.[1] ?? {})}`); } // eslint-disable-line @typescript-eslint/no-non-null-assertion",
+    "T4": "Mixed scripts: 传入参数 🌀🚀 flags=0x1F4A9, naïve façade — Ångström Æ Ø 传𠀀 ſzette ₹ ₹€¥ ｷﾀｰ (half-width katakana) ①②③ Ⅷ ﷽",
+    "T5": "2026-09-25T10:09:36Z 1,234,567 0xDEADBEEF 3.14159265358979 version>=2.1.0-beta.1+build.42 user@example.com https://example.com/a?b=1&c=2#frag"
+  }
+}

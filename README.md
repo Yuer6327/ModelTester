@@ -166,6 +166,30 @@ TTFT 仍只作 +1 弱加分，原始数字与画像始终显示——判断留�
 - **glitch 电池无退化**：`SolidGoldMagikarp` 等金丝雀逐字复述（引擎把 prompt 回声记为 tier-3 弱证据）；字母计数答出正确的 22。
 - **引擎结论**：仅 deepseek「疑似」（轨迹行）——而该模型社区猜测是 MiniMax。这次假阳性直接证明：**轨迹词汇是行业级后训练风格，不能单独驱动判定**。`ATTRIBUTION_VERSION = 2` 据此把轨迹行降为纯支持性证据（权重 3→1），并把 MiniMax 加入厂商槽位，等社区采到 MiniMax 侧的真实工件（泄漏串 / 工具命名）再入表。
 
+- **引擎结论**：仅 deepseek「疑似」（轨迹行）——而该模型社区猜测是 MiniMax。这次假阳性直接证明：**轨迹词汇是行业级后训练风格，不能单独驱动判定**。`ATTRIBUTION_VERSION = 2` 据此把轨迹行降为纯支持性证据（权重 3→1），并把 MiniMax 加入厂商槽位，等社区采到 MiniMax 侧的真实工件（泄漏串 / 工具命名）再入表。
+
+### Fertility 指纹：space-bunny-free = MiniMax-M3 tokenizer（定量实锤）
+
+被动面之外，仓库自带一组 **usage-delta fertility 指纹工具**（drill 模式，直连 API）：
+
+1. [`fingerprint-texts.json`](fingerprint-texts.json) —— 固定探针文本组 T0…T5（英文/中文/代码/多语言 emoji/数字 URL，最大化分词器分歧）；
+2. [`fingerprint-drill.mjs`](fingerprint-drill.mjs) —— 对目标模型逐条发送并记录 `usage.prompt_tokens`；网关的模板开销恒定，**相邻差分即剔除模板、隔离分词器本身**（`OPENCODE_ZEN_API_KEY=… node fingerprint-drill.mjs <model>`，快照存 `.attr-corpus/fingerprints/`，跨时间对比即可做模型替换审计）；
+3. [`fingerprint-reference.py`](fingerprint-reference.py) —— 用 9 家官方 `tokenizer.json`（tokenizers 库）本地算同一组文本的差分向量并排名比对。
+
+**2026-09-25 实测结果（space-bunny-free）**：
+
+| 候选 tokenizer | 差分 L1 距离 |
+|---|---:|
+| **minimax-m3** | **0（精确匹配）** |
+| llama | 4 |
+| deepseek-v4 | 14 |
+| glm | 16 |
+| ling / qwen | 32 |
+| gemma | 40 |
+| mistral | 51 |
+
+五维差分向量 `T1:38 T2:76 T3:45 T4:60 T5:64` 与 **MiniMax-M3 官方 tokenizer 完全一致**，其余 8 家全部偏离——社区「space-bunny 是 MiniMax 新模型」的猜测获得可复现的定量证据（指纹指向分词器/服务栈；结合 We-need 风格与行为特征，权重替换的可能性的极低）。阳性对照受限：ling-3.0 为 free-tier 仅限 OpenCode 客户端调用（403）；Kimi-K3 未发布 tokenizer.json，K2-Thinking 参考已尽可能补充。
+
 ## 安装
 
 **前置条件**：已安装 dsh CLI ≥ **0.1.0-rc.7**（`dsh --version`），并已建好目标 profile。ModelTester 按 dsh **0.1.x** 的客户端契约构建：同时兼容 **rc.7、rc.8、0.1.1-rc.x、0.1.2-rc.1、0.1.3-alpha.x、0.1.5-rc.x、0.1.6-alpha.1，以及 0.1.7 全线（alpha.1、alpha.2、rc.1、rc.2）**。更早的 rc 版本未保证兼容。逐版本的精确兼容声明（DSH STORE `dsh.compatibility.dshReleases` 矩阵）以本仓库 `package.json` 为准：0.1.6-alpha.1 与 0.1.7-rc.1 为真实 Profile 实测，0.1.7-alpha.1、0.1.7-alpha.2、0.1.7-rc.2 为静态契约探针实测（平台种子表、`shell.overlay`、`chat.legacy` 切片、SessionFace 四项逐版本比对通过）。
