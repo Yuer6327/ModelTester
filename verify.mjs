@@ -681,6 +681,12 @@ The user is asking for a quick fix. I think the issue is in the config.
   const inst = tmpl('[INST] echoed frame')
   check('attr: [INST] credits mistral first', inst.candidates[0]?.vendor, 'mistral')
   check('attr: [INST] also credits meta', inst.candidates.some(c => c.vendor === 'meta'), true)
+  check('attr: minimax bracket token → minimax', tmpl(']<]image[>[ ok').candidates[0]?.vendor, 'minimax')
+  check('attr: mistral tool frame → mistral likely', tmpl('[TOOL_CALLS] emitted').candidates[0]?.vendor === 'mistral' && tmpl('[TOOL_CALLS] emitted').verdict === 'likely', true)
+  check('attr: ling role_end → ling', tmpl('<|role_end|> done').candidates[0]?.vendor, 'ling')
+  check('attr: glm arg_key → zhipu top', tmpl('<arg_key> name').candidates[0]?.vendor, 'zhipu')
+  check('attr: qwen3 quad → qwen top', tmpl('<|quad_start|> box').candidates[0]?.vendor, 'qwen')
+  check('attr: glm role triple support-only (no verdict)', tmpl('<|assistant|> replies').candidates[0]?.verdict, 'none')
   check('attr: template token quoted in visible text must not fire', attributeSession(viewOf([{
     kind: 'assistant', seq: 1, turn: 1,
     blocks: [{ kind: 'text', text: '<|observation|> 是 GLM 的模板 token' }],

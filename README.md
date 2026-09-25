@@ -135,14 +135,14 @@ TTFT 仍只作 +1 弱加分，原始数字与画像始终显示——判断留�
 
 ## <a id="attribution"></a>归属分析（attribution）
 
-**一句话**：扫描全部已加载推理文本（探针哨兵顺带扫可见回复），把命中的结构指纹按权重累到厂商候选上；候选达到「匹配」需要至少一条 **tier-1** 证据且明显领先第二名，仅 tier-2/3 证据封顶「疑似」，只有无厂商证据时显示「未匹配」并列出泄漏物。这是**结构指纹匹配**，不是身份断言。厂商槽位：DeepSeek 系 / Anthropic 系 / OpenAI 系 / Google / Qwen / GLM / Kimi / MiniMax / Llama / Mistral。
+**一句话**：扫描全部已加载推理文本（探针哨兵顺带扫可见回复），把命中的结构指纹按权重累到厂商候选上；候选达到「匹配」需要至少一条 **tier-1** 证据且明显领先第二名，仅 tier-2/3 证据封顶「疑似」，只有无厂商证据时显示「未匹配」并列出泄漏物。这是**结构指纹匹配**，不是身份断言。厂商槽位：DeepSeek 系 / Anthropic 系 / OpenAI 系 / Google / Qwen / GLM / Kimi / MiniMax / Llama / Mistral / Ling。
 
 证据表（[`src/client/attribution-signals.ts`](src/client/attribution-signals.ts)，`ATTRIBUTION_VERSION = 1`；引擎 [`attribution.ts`](src/client/attribution.ts)）分层：
 
 | 层 | 证据 | 厂商 | 权重 |
 |---|---|---|---:|
 | 1 · 基础设施泄漏 | `antml` 命名空间（工具调用 XML 漏进推理） | Anthropic 系 | 6 |
-| 1 · 模板泄漏 | 各家对话模板特殊 token：`<minimax:tool_call>`（MiniMax-M2 官方模板）、Kimi `<|im_middle|>`/`<|im_user|>`、GLM `<|observation|>`、DeepSeek 全角 `<｜Assistant｜>`、Llama-3 `<|eot_id|>`/`<|start_header_id|>`、Llama-2 `<<SYS>>`、`[INST]`（Mistral+Llama-2 共有）、ChatML `<|im_start|>`（Qwen 系）、Gemma `<start_of_turn>` | 对应厂商 | 5–6 |
+| 1 · 模板泄漏 | 各家对话模板特殊 token（取自官方 `tokenizer_config.json` 最新代：DeepSeek-V3.2、Qwen3-2507、GLM-4.6、Kimi-K2-Thinking、MiniMax-M2.1、Llama-4/3.3、Mistral-Small-3.2、Gemma-3、Ling-1T，见 [`src/client/tokenizers.ts`](src/client/tokenizers.ts)）：`<minimax:tool_call>` 与 `]<]image[>[` 括号融合族、Kimi `<|im_middle|>`/`<|tool_calls_section_begin|>`、GLM `<|observation|>`/`<arg_key>`/`/nothink`、DeepSeek 全角 `<｜Assistant｜>`、Llama-3 `<|eot_id|>` 与 Llama-4 `<|header_start|>`/`<|eot|>`、`[INST]`（Mistral+Llama-2 共有）、Mistral `[TOOL_CALLS]`/`[AVAILABLE_TOOLS]`、ChatML `<|im_start|>`+Qwen3 `<|quad_start|>` 系、Gemma `<start_of_turn>`、Ling `<|role_end|>` | 对应厂商 | 2–6 |
 | 1 | `fp_v4pro_…` 部署串（社区观测于灰测会话） | DeepSeek 系 | 5 |
 | 1 | 其他 `fp_…` 串（OpenAI 风格 API 指纹） | OpenAI 系 | 4 |
 | 2 · 轨迹词汇 | 0813 Minimal（`we need`/`let's` 且零 `let me`）与 Standard（`let me` 沉重）指纹 | DeepSeek 系 | 1（支持性） |

@@ -24,22 +24,22 @@ import type { WordCounts } from './stats.ts'
 import type { PatternCounts } from './stats.ts'
 
 /** Version of the attribution table and scoring rules. */
-export const ATTRIBUTION_VERSION = 3 as const
+export const ATTRIBUTION_VERSION = 4 as const
 
 /** Vendor families the evidence table can support. */
-export type Vendor = 'deepseek' | 'anthropic' | 'openai' | 'google' | 'qwen' | 'zhipu' | 'moonshot' | 'minimax' | 'meta' | 'mistral'
+export type Vendor = 'deepseek' | 'anthropic' | 'openai' | 'google' | 'qwen' | 'zhipu' | 'moonshot' | 'minimax' | 'meta' | 'mistral' | 'ling'
 
 /** Stable union of every signal id (scanned + derived) — also the locale key suffix. */
 export type SignalId =
   | 'antml-ns' | 'fp-v4pro' | 'fp-generic' | 'edm-func' | 'everyday-calc' | 'nameeee'
   | 'style-delve' | 'anom-ns-tag' | 'anom-hex' | 'anom-ident' | 'anom-repeat'
   | 'probe-glitch-r50k' | 'probe-glitch-cl100k' | 'probe-echo' | 'probe-cutoff' | 'probe-count'
-  | 'tmpl-minimax' | 'tmpl-kimi' | 'tmpl-glm' | 'tmpl-deepseek' | 'tmpl-llama3' | 'tmpl-llama2'
-  | 'tmpl-inst' | 'tmpl-chatml' | 'tmpl-gemma'
+  | 'tmpl-minimax' | 'tmpl-kimi' | 'tmpl-glm' | 'tmpl-glm-roles' | 'tmpl-deepseek' | 'tmpl-llama3' | 'tmpl-llama2'
+  | 'tmpl-inst' | 'tmpl-mistral-tools' | 'tmpl-chatml' | 'tmpl-gemma' | 'tmpl-ling'
   | 'traj-minimal' | 'traj-standard' | 'style-emdash'
 
 /** Display order (also the tiebreak for equal scores). */
-export const VENDORS: readonly Vendor[] = ['deepseek', 'anthropic', 'openai', 'google', 'qwen', 'zhipu', 'moonshot', 'minimax', 'meta', 'mistral']
+export const VENDORS: readonly Vendor[] = ['deepseek', 'anthropic', 'openai', 'google', 'qwen', 'zhipu', 'moonshot', 'minimax', 'meta', 'mistral', 'ling']
 
 /** Evidence strength class. */
 export type EvidenceTier = 1 | 2 | 3
@@ -211,41 +211,49 @@ const templateSignals: readonly AttributionSignal[] = [
     id: 'tmpl-minimax',
     kind: 'template',
     tier: 1,
-    match: [/<\/?minimax:[\w-]+>/g],
+    match: [/<\/?minimax:[\w-]+>/g, /\]<\](?:image|video|speech|vision pad|start of image|start of video|start of speech|end of image|end of video|end of speech)\[>\[/g, /\]!p~\[/g, /\[e~\[/g, /\]~b\]/g, /\]!d~\[/g, /\]~!b\[/g],
     vendors: { minimax: 6 },
-    rationale: 'MiniMax-M2 tool-call namespace <minimax:tool_call> — vendor-namespaced tag from the official chat_template.jinja.',
+    rationale: 'MiniMax-M2.x template tokens from the official tokenizer_config.json: the <minimax:tool_call> namespace and the bizarre ]<]…[>[ / ]!p~[ bracket-fusion tokens, near-impossible in other vocabularies.',
   },
   {
     id: 'tmpl-kimi',
     kind: 'template',
     tier: 1,
-    match: [/<\|im_middle\|>/g, /<\|im_user\|>/g, /<\|im_system\|>/g, /<\|media_pad\|>/g],
+    match: [/<\|im_middle\|>/g, /<\|im_user\|>/g, /<\|im_system\|>/g, /<\|im_assistant\|>/g, /<\|tool_calls_section_begin\|>/g, /<\|tool_call_begin\|>/g, /<\|media_pad\|>/g],
     vendors: { moonshot: 6 },
-    rationale: 'Kimi (Moonshot) template tokens — the <|im_middle|>/<|im_user|> variants are specific to the official Kimi-K2 chat_template.jinja.',
+    rationale: 'Kimi (Moonshot) template tokens — the <|im_middle|>/<|im_user|> variants and tool_calls_section tokens are specific to the official Kimi-K2 chat_template/tokenizer_config.',
   },
   {
     id: 'tmpl-glm',
     kind: 'template',
     tier: 1,
-    match: [/<\|observation\|>/g],
+    match: [/<\|observation\|>/g, /<arg_key>/g, /<\/arg_key>/g, /<arg_value>/g, /\/nothink/g, /<\|begin_of_box\|>/g],
     vendors: { zhipu: 6 },
-    rationale: 'GLM-4.x <|observation|> token — distinctive to Zhipu GLM tool-calling template.',
+    rationale: 'GLM-4.x tool/toolbox tokens (<|observation|>, <arg_key>, /nothink switch) from the official GLM-4.6 tokenizer_config.',
+  },
+  {
+    id: 'tmpl-glm-roles',
+    kind: 'template',
+    tier: 2,
+    match: [/<\|system\|>/g, /<\|user\|>/g, /<\|assistant\|>/g],
+    vendors: { zhipu: 2 },
+    rationale: 'GLM role triple — present in the GLM-4.6 tokenizer but shared with the older Vicuna-style template heritage, so support-only.',
   },
   {
     id: 'tmpl-deepseek',
     kind: 'template',
     tier: 1,
-    match: [/<｜begin▁of▁sentence｜>/g, /<｜Assistant｜>/g, /<｜User｜>/g],
+    match: [/<｜begin▁of▁sentence｜>/g, /<｜end▁of▁sentence｜>/g, /<｜Assistant｜>/g, /<｜User｜>/g],
     vendors: { deepseek: 6 },
-    rationale: 'DeepSeek template tokens with full-width ｜ (U+FF5C) and ▁ (U+2581) — unmistakable DeepSeek tokenizer artifacts.',
+    rationale: 'DeepSeek template tokens with full-width ｜ (U+FF5C) and ▁ (U+2581) — unmistakable DeepSeek tokenizer artifacts (DeepSeek-V3.2 tokenizer_config).',
   },
   {
     id: 'tmpl-llama3',
     kind: 'template',
     tier: 1,
-    match: [/<\|begin_of_text\|>/g, /<\|start_header_id\|>/g, /<\|eot_id\|>/g, /<\|finetune_right_pad_id\|>/g],
+    match: [/<\|begin_of_text\|>/g, /<\|start_header_id\|>/g, /<\|eot_id\|>/g, /<\|finetune_right_pad_id\|>/g, /<\|header_start\|>/g, /<\|header_end\|>/g, /<\|eot\|>/g, /<\|eom\|>/g, /<\|python_start\|>/g],
     vendors: { meta: 6 },
-    rationale: 'Llama-3 template tokens (begin_of_text / start_header_id / eot_id).',
+    rationale: 'Llama-3.x and Llama-4 template tokens (begin_of_text / start_header_id / eot_id; Llama-4 header_start / eot / eom / python_start) from the official tokenizer_config.',
   },
   {
     id: 'tmpl-llama2',
@@ -264,12 +272,20 @@ const templateSignals: readonly AttributionSignal[] = [
     rationale: '[INST] template frame — shared by the Mistral and Llama-2 lineages, so both families get support.',
   },
   {
+    id: 'tmpl-mistral-tools',
+    kind: 'template',
+    tier: 1,
+    match: [/\[TOOL_CALLS\]/g, /\[AVAILABLE_TOOLS\]/g, /\[\/AVAILABLE_TOOLS\]/g, /\[SYSTEM_PROMPT\]/g, /\[ARGS\]/g, /\[CALL_ID\]/g],
+    vendors: { mistral: 6 },
+    rationale: 'Mistral tool-call frame tokens ([TOOL_CALLS] / [AVAILABLE_TOOLS] / [ARGS]…) from the official Mistral-Small-3.2 tokenizer_config — bracket-style, unique to Mistral.',
+  },
+  {
     id: 'tmpl-chatml',
     kind: 'template',
     tier: 1,
-    match: [/<\|im_start\|>/g],
-    vendors: { qwen: 5, moonshot: 2 },
-    rationale: 'ChatML <|im_start|> frame — Qwen lineage primary; Kimi reuses the im_ prefix with its own variants (see tmpl-kimi).',
+    match: [/<\|im_start\|>/g, /<\|object_ref_start\|>/g, /<\|quad_start\|>/g, /<\|vision_start\|>/g, /<\|box_start\|>/g],
+    vendors: { qwen: 5 },
+    rationale: 'ChatML <|im_start|> frame plus Qwen3-unique control tokens (object_ref / quad / vision / box) from the official Qwen3 tokenizer_config.',
   },
   {
     id: 'tmpl-gemma',
@@ -278,6 +294,14 @@ const templateSignals: readonly AttributionSignal[] = [
     match: [/<start_of_turn>/g, /<end_of_turn>/g],
     vendors: { google: 6 },
     rationale: 'Gemma turn markers <start_of_turn>/<end_of_turn>.',
+  },
+  {
+    id: 'tmpl-ling',
+    kind: 'template',
+    tier: 1,
+    match: [/<\|role_end\|>/g, /<\|startoftext\|>/g],
+    vendors: { ling: 5 },
+    rationale: 'InclusionAI Ling tokens (<|role_end|> / <|startoftext|>) from the official Ling-1T tokenizer_config.',
   },
 ]
 

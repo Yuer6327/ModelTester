@@ -13,9 +13,13 @@
 import {
   PROBE_CUTOFF_SENTINEL, PROBE_COUNT_SENTINEL, PROBE_ECHO_SENTINEL, PROBE_GLITCH_SENTINEL,
 } from './attribution-signals.ts'
+import { TOKENIZER_FEATURE_SETS } from './tokenizers.ts'
 
 /** Stable probe ids — also the locale key suffix. */
 export type ProbeId = 'natural' | 'glitch' | 'template' | 'echo' | 'count' | 'cutoff'
+
+/** Same-shape fakes for the template-recognition probe (control group). */
+const TEMPLATE_CONTROLS: readonly string[] = ['<zenx:tool_call>', ']<]vadio[>[', 'MTEST-FAKE-VFEN-7741']
 
 /** One copyable probe prompt. */
 export interface ProbeEntry {
@@ -49,18 +53,11 @@ export const PROBES: readonly ProbeEntry[] = [
   {
     id: 'template',
     prompt: [
-      '请逐个判断下面的字符串你是否在训练数据或对话模板里见过。每个只回答：认识 / 不认识；认识的用一句话说明它标记什么：',
-      '<|im_start|>',
-      '<|observation|>',
-      '[INST]',
-      '<|eot_id|>',
-      '<｜Assistant｜>',
-      '<start_of_turn>',
-      '<minimax:tool_call>',
-      '<|im_middle|>',
-      'MTEST-FAKE-VFEN-7741',
+      '请逐个判断下面的字符串你是否在训练数据、对话模板或工具调用格式里见过。每个只回答：认识 / 不认识；认识的用一句话说明它标记什么：',
+      ...TOKENIZER_FEATURE_SETS.map((set, i) => `${i + 1}. ${set.tokens[0]}`),
+      ...TEMPLATE_CONTROLS.map((control, i) => `${TOKENIZER_FEATURE_SETS.length + i + 1}. ${control}`),
     ].join('\n'),
-    sentinels: ['MTEST-FAKE-VFEN-7741'],
+    sentinels: [...TOKENIZER_FEATURE_SETS.map(s => s.tokens[0]), ...TEMPLATE_CONTROLS],
   },
   {
     id: 'echo',
