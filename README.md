@@ -1,313 +1,162 @@
 <img width="1710" height="1082" alt="" src="https://github.com/user-attachments/assets/ef968872-f49b-4183-9b20-9e9fe6846466" />
 
 
-# ModelTester · dsh 推理轨迹面板
+# ModelTester · dsh 模型检测面板
 
 [![npm version](https://img.shields.io/npm/v/dsh-modeltester)](https://www.npmjs.com/package/dsh-modeltester) [![dsh-std Community v0.15](https://img.shields.io/badge/dsh--std-Community%20v0.15-6a4cff)](https://github.com/Yuer6327/ModelTester/blob/main/dsh-plugin.json) [![Awesome dsh-plugin](https://camo.githubusercontent.com/d49867731e8dae50cfe6c3e25a3ef1d845d4e55aace9b1da5a31d47162f8e683/68747470733a2f2f617765736f6d652d6473682d706c7567696e2e636f6d2f62616467652e737667)](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)
 
-ModelTester 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh）网页端插件，在会话页右侧边缘挂载一块**实时推理关键词统计面板**。
+ModelTester 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh）网页端插件：在会话页右上角挂载一块**模型检测面板**，回答两个问题——
 
-> **品牌说明**：ModelTester 是 [NoLetMe](https://github.com/Yuer6327/NoLetMe) v0.3.9 的品牌重构版（2026-09-25）：npm 包更名 `dsh-modeltester`、插件 id 更名 `io.github.yuer6327.modeltester`、仓库迁移 `Yuer6327/ModelTester`，版本从 `0.0.1-alpha.1` 重新开始；功能与 dsh 兼容矩阵延续。npm 与 DSH STORE 上架准备中，暂未发布。
+1. **当前会话像哪家模型？**（归属分析：11 家厂商候选 + 完整证据账本）
+2. **是否命中社区灰测 / 新模型内测特征？**（灰测特征强度）
 
-模型流式输出时，ModelTester 只统计其**推理块（reasoning blocks）**中出现的特征词，据此反映当前推理风格：
+一切判定都是本地、无模型、零网络的**结构指纹匹配**，且每一条结论都附带可展开的证据与上下文样本。面板回答「像谁」，不回答「是谁」。
 
-| 分类 | 关键词 | 依据 |
+> **前身**：[NoLetMe](https://github.com/Yuer6327/NoLetMe) v0.3.9，2026-09-25 品牌重构为独立新项目（npm `dsh-modeltester`，插件 id `io.github.yuer6327.modeltester`，版本自 `0.0.1-alpha.1` 起算）。
+
+## 功能总览
+
+| 层 | 回答的问题 | 实现 |
 |---|---|---|
-| 🟢 高效 · 直接行动 | `We need…` `Let's…` `We should…` `We can…` `We will…`；首行 `Good.`/`Great.`/`Excellent.` | minimal 类高分轨迹 |
-| 🟠 犹豫 · 第一人称试探 | `Let me…` `I think…` `I'm not sure…` `I wonder…` `I guess…` `maybe` `perhaps` | standard 类低分轨迹 |
-| ⚪ 中性 · 复述任务 | `The user wants…` `The user asked…` `this task…` `the request…` | Standard 目录开场框架 |
+| **归属分析**（主视图） | 这个会话**像哪家**？ | 11 家厂商候选评分排名 + 证据账本（[`src/client/attribution.ts`](src/client/attribution.ts)） |
+| **模板 / 分词器指纹** | 服务栈的模板与词表是哪家的？ | 各家官方 tokenizer_config 特殊 token 的 tier-1 泄漏行（[`src/client/tokenizers.ts`](src/client/tokenizers.ts)） |
+| **脏 token 与泄漏物** | 底层漏出了什么工件？ | 社区证实清单 + 通用异常探测器：未收录泄漏自动入账本，供一行入表 |
+| **灰测特征** | 是不是灰测 / 内测？ | `I'm doing`、概要形 CoT、会话动态 TTFT 线（[`src/client/graytest.ts`](src/client/graytest.ts)） |
+| **0813 轨迹指纹** | 后训练风格像哪条轨迹？ | `We need` / `Let me` / `The user wants` 词法（支持性证据，[`src/client/keywords.ts`](src/client/keywords.ts)） |
+| **探针包** | 怎么主动取证？ | 6 个一键复制探针（自然任务 / glitch 电池 / 模板识别 / 回声 / 字母计数 / 知识截止），含假 token 对照 |
+| **fertility 指纹**（仓库工具） | 分词器**定量**是哪家？ | usage 差分 + 官方 tokenizer 本地比对（`fingerprint-drill.mjs`） |
 
-**归属分析**是主视图：把脏 token、后端泄漏串、轨迹词汇等结构指纹映射到厂商候选（DeepSeek 系 / Anthropic 系 / OpenAI 系 / Google / Qwen / GLM / Kimi），输出带证据账本的排名；**灰测**降级为其中的「灰测特征」强度行。判定规则见 [归属分析](#attribution) 与 [灰测如何判定](#gray-test)。
+面板实时增量折叠流式输出、自动回填完整历史（≤30 页）、按会话本地持久化；不发送任何数据，不改动、不补丁宿主任何既有 UI。
 
-面板是原生融入的悬浮层：复用 harness 设计系统（`--dsw-alias-*` 语义令牌、DetailsPanel 头/体结构、CSS Modules、明暗与 reduced-motion），通过官方 `shell.overlay` 插槽挂载，不改动、不补丁任何既有 UI。
+## 归属分析（主视图）
 
-## 证据链
+**判定规则**：扫描全部已加载推理文本（探针哨兵顺带扫可见回复），把命中的结构指纹按权重累到厂商候选上；候选达到「匹配」需要至少一条 **tier-1** 证据且明显领先第二名，仅 tier-2/3 证据封顶「疑似」，只有无厂商证据时显示「未匹配」并列出泄漏物。证据账本按信号去重（≤40 条），每条带首现轮次与 ±40 字上下文样本。
 
-本插件的分类体系**并非杜撰**，每一条都追溯至公开的 [xiaobright/modeltest](https://github.com/xiaobright/modeltest) 仓库，及其对 **DeepSeek V4 Pro GA 0813 后训练过拟合事件**的调研：在 DeepSeek Harness「Minimal」预设（RL 训练所用的双工具脚手架）上训练出的 checkpoint，换到更宽的 Standard 工具目录后能力崩塌。
-
-**测试集**：Project2 V4.1b —— 一个真实损坏的 ESP-IDF 嵌入式工程任务，已**正式冻结**（[`PROJECT_FROZEN.md`](https://github.com/xiaobright/modeltest/blob/main/PROJECT_FROZEN.md)，2026-07-23 冻结；评分规则与隐藏测试于 2026-07-19 做 SHA-256 固定）。
-
-**实测数据**：`evaluator/trajectory_evidence/derived/trajectory_stats.json`（每次运行做 SHA-256 固定；只统计已完成的助手推理块，排除流式分块）：
-
-| 运行（模型 / 配置） | 得分 | `we` | `let me` | `let's` | `I` | 可见回复 |
-|---|---:|---:|---:|---:|---:|---:|
-| V4 Pro / **Minimal** WSL | 99 | 272 | **0** | 101 | 17 | 1 |
-| V4 Pro / **Minimal** WSL | 96 | 231 | **0** | 117 | 18 | 1 |
-| V4 Pro / **anchored-standard** Win | 98 | 179 | **1** | 88 | 17 | 1 |
-| V4 Pro / **anchored-standard** Win | 99 | 165 | **0** | 98 | 18 | 1 |
-| V4 Pro / **Standard** WSL | 91 | 11 | **208** | 2 | 137 | 55 |
-| V4 Pro / **PTC** WSL | 92 | 16 | **194** | 0 | 237 | 33 |
-
-高分运行（96–99）带 `we`/`let's`、`let me ≈ 0`；低分运行（91–92）`let me` 数以百计。这条干净的界线就是 🟢 高效 / 🟠 犹豫的划分来源。
-
-**分类器**：仓库自带精确词法规则（[`evaluator/trigger_probe/src/classifier.mjs`](https://github.com/xiaobright/modeltest/blob/main/evaluator/trigger_probe/src/classifier.mjs)），ModelTester 逐条镜像：首行 `We need` → minimal 类；有 `we` 无 `let me` → +2；出现任何 `let me` → standard 类；独立首行 `Good.`/`Great.`/`Excellent.` → +1。⚪ 中性类覆盖其余 `ambiguous`（模糊）及复述框架 —— Standard 目录开场 `The user wants … Let me …`（见 [`DEEPSEEK_V4_TRIGGER_MECHANISM_EXPERIMENTS_20260814.md`](https://github.com/xiaobright/modeltest/blob/main/docs/v4.1/DEEPSEEK_V4_TRIGGER_MECHANISM_EXPERIMENTS_20260814.md)），外加通用任务描述词汇。
-
-**诚实边界**：原始矩阵原文警告：*"词法轨迹标签是观测性指纹，而非路由或身份标签。"* 词频只反映推理*风格*，不能判定后端、路由或 checkpoint；V4 Flash 会在分数不变时改变风格。灰测探针同样只报告社区观测到的特征组合，**不能**据此断言路由到了哪家模型。ModelTester 是推理风格诊断工具，不是模型身份测试。
-
-文献上的「LLM 风格指纹」分类器（例如 [Bitton & Bitton, arXiv:2503.01659](https://arxiv.org/abs/2503.01659) 的三分类器集成，或 Attestify 一类需训练语料的统计指纹）需要离线权重与校准集，**不适合塞进这个浏览器插件**。ModelTester 只保留能本地、无模型地从 reasoning 算出的统计：列表密度、块长 p50、TTR、平均词长，作为灰测旁的完整数据，而不是把会话贴上 Claude/Gemini/GPT 标签。
-
-完整事件报告见 [`docs/research.md`](docs/research.md)。
-
-## <a id="gray-test"></a>灰测如何判定
-
-**一句话**：对会话里每个助手轮独立打分，`score ≥ 5` 命中、`≥ 2` 疑似、否则未命中；任一轮命中即整段会话显示命中。加分项：出现 `I'm doing` **+4**、开场即 `I'm doing` **+2**、概要/条目形 CoT（列表行占比 ≥ 35%）**+2**、脏 token（`Nameeee` 等）**+2**、泄漏 `fp_…` 串 **+2**、TTFT 超过本会话动态线 **+1**；减分项：`Let me ≥ 2` 且无 I'm doing **−3**、裸 `we ≥ 3` 且无 I'm doing **−1**。0813 词表完全不动。
-
-面板「灰测」一行（未命中 / 疑似 / 命中）的规则写在这里。实现：[`src/client/graytest.ts`](src/client/graytest.ts)（信号表 [`gray-signals.ts`](src/client/gray-signals.ts)），`GRAYTEST_VERSION = 3`。
-
-### 按轮判定，再聚合
-
-灰测是抽卡——一次抽中一轮。探针因此**逐轮独立计分**：
-
-1. 每个已加载的 `assistant` 节点各得一个 `TurnProbe`（verdict、score、I'm doing 数、列表密度、TTFT…）；
-2. 流式 `partial` 单独算一条 `live` 轮（无 timing）；
-3. 会话聚合：任一轮 `likely` → 命中；否则任一轮 `possible` → 疑似；面板徽章取最高分轮的家族。
-
-这样第 3 轮抽中不会被前两轮 0813 的 `Let me` 稀释；反过来旧会话里偶然一次 `I'm doing` 也只影响那一轮。展开后「按轮」区列出每轮一行（`T<turn>` / `live` · verdict · I'm doing · TTFT · 吐字时长）。
-
-### 每轮怎么打分
-
-对这一轮的 reasoning 文本（只算 `kind === 'reasoning'` 的块，可见 text 一律不算）：
-
-| 信号 | 分 | 说明 |
-|---|---:|---|
-| `I'm doing` / `I am doing` / 粘连 `I'mdoing` ≥ 1 | **+4** | 08-19/20 社区主指纹 |
-| 本轮最新块首行即 `I'm doing…` | **+2** | 开场比块中出现更强 |
-| 有 `I'm doing` 且该轮 `let me` = 0 | **+1** | 灰测常缺 Let me |
-| **概要形**：列表/标题行占比 ≥ 35%（或 ≥ 15% 且有 `I'm doing`） | **+2** | 列表行 = 行首 `-` `*` `•` `1.` `1)` `#`–`###` |
-| 脏 token：`Nameeee`、`antml:thinking`、`<antml`、`EDMFunc`、`everydaycalculation` | **+2** | 从 reasoning 漏出 |
-| 后端串 `fp_…`（如 `fp_v4pro_20260812_prod`） | **+2** | 部署指纹，当细节不是身份 |
-| **TTFT 异常慢**（超过本会话动态线） | **+1** | 见下节；受网络影响，封顶 +1 |
-| 该轮 `let me` ≥ 2 且无 `I'm doing` | **−3** | 典型 0813 Standard |
-| 裸 `we` ≥ 3、无 `I'm doing`、非概要形 | **−1** | 典型 0813 Minimal |
-
-阈值：`score ≥ 5` → 命中；`score ≥ 2` → 疑似；其余未命中。
-
-### TTFT / 吐字节奏（动态线，抗网络干扰）
-
-社区反复强调灰测「首字很慢」「一段一段出」。宿主在 `assistant` 节点上记录 `timing.stepStartTime / firstTokenTime / completedTime`，插件据此给出每轮：
-
-- **TTFT** = firstToken − stepStart；
-- **吐字时长** stream = completed − firstToken；
-- **ms/字符** = TTFT ÷ 该轮推理字符数。
-
-这些时间戳包含排队与网络，固定阈值会在慢链路上误报。所以插件用**会话自己的历史轮**估网络质量，动态调整命中线：
-
-| 画像字段 | 含义 |
-|---|---|
-| `ttftBaseline` | 已计轮 TTFT 的**中位数**——这条链路的底噪 |
-| `ttftSpread` | p90 ÷ p50——抖动程度 |
-| `streamCharsPerSec` | 吐字阶段每秒推理字符（慢链路同样拖低它） |
-| `slowLineMs` | 动态命中线 = max(基线 + 3 s, 基线 × 2 × 抖动)，下限 2.5 s、上限 60 s |
-
-效果：全程 ~9 s 的慢代理把基线抬到 9.5 s、命中线抬到 ~20 s——自己的每一轮都**不会**被误报；快链路（~0.7 s 基线）命中线收紧到 ~3.7 s，一次 5 s 的卡顿照样被抓。样本 < 2 轮时退回静态规则（≥ 6 s 或 ≥ 300 ms/字符）。
-
-TTFT 仍只作 +1 弱加分，原始数字与画像始终显示——判断留给用户。流式 partial 没有时间戳，TTFT 列留空。
-
-### 面板上的数字（命中与否都显示）
-
-本地、无模型的描述统计，**不是**把会话贴上 Claude / Gemini / GPT 标签：
-
-| 字段 | 含义 |
-|---|---|
-| I'm doing | 全部 reasoning 里出现次数 |
-| 列表密度 | 会话级列表行占比 |
-| p50 | reasoning 块字符数中位数 |
-| TTR | 小写分词 type-token ratio |
-| 词长 | 字母 token 平均长度 |
-| TTFT↑ | 任一轮触发慢首字时提示 |
-| 按轮 | 每轮 verdict / I'm doing / TTFT / 吐字 |
-| 脏 token / fp | 仅当扫到时显示原文 |
-
-### 词表与校准
-
-指纹（脏 token、开场词、fp 正则、列表行正则）集中在 [`src/client/gray-signals.ts`](src/client/gray-signals.ts)，新增社区报告改表即可。`pnpm calibrate` 用两组语料做回归：
-
-- **正样本**：社区引用的灰测推理（I'm-doing 开场 + 条目 CoT）→ 必须命中/疑似；
-- **负样本**：modeltest 冻结的 11 条 0813 轨迹聚合（含带少量 `I'm` 的 build 记录）→ 合成会话后**不得到达 likely**。
-
-文献上的家谱鉴定（[Bitton & Bitton, arXiv:2503.01659](https://arxiv.org/abs/2503.01659) 三分类器集成等）需要训练权重与校准集，**不进这个浏览器插件**。
-
-### 诚实边界
-
-灰测命中只表示「某轮 reasoning 像社区灰测簇」，**不能**据此断言路由到了哪家模型、哪个 checkpoint、哪台机器。词法标签与时间特征都是观测性指纹，不是身份。V4 Flash 也会在分数不变时改风格。
-
-更短的矩阵与 0813 对照见 [`docs/research.md`](docs/research.md)。
-
-## <a id="attribution"></a>归属分析（attribution）
-
-**一句话**：扫描全部已加载推理文本（探针哨兵顺带扫可见回复），把命中的结构指纹按权重累到厂商候选上；候选达到「匹配」需要至少一条 **tier-1** 证据且明显领先第二名，仅 tier-2/3 证据封顶「疑似」，只有无厂商证据时显示「未匹配」并列出泄漏物。这是**结构指纹匹配**，不是身份断言。厂商槽位：DeepSeek 系 / Anthropic 系 / OpenAI 系 / Google / Qwen / GLM / Kimi / MiniMax / Llama / Mistral / Ling。
-
-证据表（[`src/client/attribution-signals.ts`](src/client/attribution-signals.ts)，`ATTRIBUTION_VERSION = 1`；引擎 [`attribution.ts`](src/client/attribution.ts)）分层：
+证据表（`ATTRIBUTION_VERSION = 5`，[`src/client/attribution-signals.ts`](src/client/attribution-signals.ts)）分层：
 
 | 层 | 证据 | 厂商 | 权重 |
 |---|---|---|---:|
 | 1 · 基础设施泄漏 | `antml` 命名空间（工具调用 XML 漏进推理） | Anthropic 系 | 6 |
-| 1 · 模板泄漏 | 各家对话模板特殊 token（取自官方 `tokenizer_config.json` 最新代：DeepSeek-V3.2、Qwen3-2507、GLM-4.6、Kimi-K2-Thinking、MiniMax-M2.1、Llama-4/3.3、Mistral-Small-3.2、Gemma-3、Ling-1T，见 [`src/client/tokenizers.ts`](src/client/tokenizers.ts)）：`<minimax:tool_call>` 与 `]<]image[>[` 括号融合族、Kimi `<|im_middle|>`/`<|tool_calls_section_begin|>`、GLM `<|observation|>`/`<arg_key>`/`/nothink`、DeepSeek 全角 `<｜Assistant｜>`、Llama-3 `<|eot_id|>` 与 Llama-4 `<|header_start|>`/`<|eot|>`、`[INST]`（Mistral+Llama-2 共有）、Mistral `[TOOL_CALLS]`/`[AVAILABLE_TOOLS]`、ChatML `<|im_start|>`+Qwen3 `<|quad_start|>` 系、Gemma `<start_of_turn>`、Ling `<|role_end|>` | 对应厂商 | 2–6 |
+| 1 · 模板泄漏 | 各家对话模板特殊 token（取自**最新代**官方 `tokenizer_config.json`：DeepSeek-V4.1-Flash、Qwen3-2507、GLM-4.6、Kimi-K3、MiniMax-M3、Llama-4、Mistral-Small-3.2、Gemma-3、Ling-1T）：MiniMax `<mm:think>` 与 `]<]image[>[` 括号融合族、Kimi `<|end_of_msg|>`/`<osagent_mode>`、GLM `<|observation|>`/`<arg_key>`/`/nothink`、DeepSeek 全角 `<｜Assistant｜>`、Llama-4 `<|header_start|>`/`<|eot|>`、Mistral `[TOOL_CALLS]`、ChatML `<|im_start|>` 系、Gemma `<start_of_turn>`、Ling `<|role_end|>` | 对应厂商 | 2–6 |
 | 1 | `fp_v4pro_…` 部署串（社区观测于灰测会话） | DeepSeek 系 | 5 |
 | 1 | 其他 `fp_…` 串（OpenAI 风格 API 指纹） | OpenAI 系 | 4 |
 | 2 · 轨迹词汇 | 0813 Minimal（`we need`/`let's` 且零 `let me`）与 Standard（`let me` 沉重）指纹 | DeepSeek 系 | 1（支持性） |
 | 2 · 已证实脏 token | `EDMFunc`、`everydaycalculation`、`Nameeee`（厂商未定） | 未归属 | — |
 | 2 · 异常探测器 | 未收录 XML 标签、长十六进制串、`EDMFunc` 样后端标识、退化重复 | 未归属 | — |
-| 3 · 风格轶事/探针 | `delve` 词癖、破折号密度（≥3/千字）、glitch 金丝雀（r50k：`SolidGoldMagikarp` 系；cl100k：`petertodd` 系，清单取自 [SolidGoldMagikarp 研究](https://www.lesswrong.com/posts/aPeJE8bSo6rAFoLqg/solidgoldmagikarp-plus-prompt-generation)、[arXiv:2404.09894](https://arxiv.org/abs/2404.09894) 与 [garak 扫描器公开表](https://github.com/NVIDIA/garak/blob/main/garak/probes/glitch.py)）、探针哨兵回声 | 弱支持 | 1 |
+| 3 · 风格轶事/探针 | `delve` 词癖、破折号密度、glitch 金丝雀（r50k/cl100k 分族，见下）、探针哨兵回声 | 弱支持 | 1 |
 
-- **异常探测器**抓的是表里还没有的泄漏物：命中进「未归属」账本，附 ±40 字上下文样本，可直接抄给社区、一行入表。
-- **证据账本**按信号去重、封顶 40 条，每条带首现轮次与样本；逐轮行显示当轮最像的厂商与新增证据数。
-- **探针包**（面板底部，一键复制）：自然任务（主力语料）、glitch token 电池（r50k + cl100k 金丝雀，清单取自公开研究）、模板识别（对各家特殊 token 逐一问认识/不认识，末行假 token 做对照——引擎不解析此探针的回答，只供人工判读）、不可见字符回声电池、字母计数、知识截止探针。插件无法替你发消息（宿主契约只读）——复制后手动发到目标会话，模型回复由引擎被动扫描；哨兵回声记入账本，**复述是否退化请人工判断**（面板注有判断要点）。
-- **证据包导出**：归属区一键复制 JSON（候选、证据、灰测特征、会话 id），纯本地、零网络。
+glitch 金丝雀清单取自公开研究：[SolidGoldMagikarp（LessWrong）](https://www.lesswrong.com/posts/aPeJE8bSo6rAFoLqg/solidgoldmagikarp-plus-prompt-generation)、[arXiv:2404.09894](https://arxiv.org/abs/2404.09894) 与 [garak 扫描器公开表](https://github.com/NVIDIA/garak/blob/main/garak/probes/glitch.py)。
 
-**诚实边界**：结构指纹 ≠ 模型身份。`antml` 这类工件可能来自**脚手架**而非底座模型（Claude 系脚手架包裹任意底座都会漏 antml）；轨迹词汇是 DeepSeek 后训练/脚手架层面的指纹；风格标记是社区轶事级证据，checkpoint 漂移会改变风格。归属排名回答「像谁」，不回答「是谁」。
+- **模板泄漏行只扫推理**：探针**回答里引用**特殊 token 不触发归属，避免自产假阳性；模板识别探针仅供人工判读（末行假 token 是对照组）。
+- **异常探测器**抓的是表里还没有的泄漏物：命中进「未归属」账本，可直接抄给社区、一行入表（`ATTRIBUTION_VERSION` 随之递增）。
+- **逐轮行**显示当轮最像的厂商与新增证据数；**证据包导出**一键复制 JSON（候选、证据、灰测特征、会话 id），纯本地。
 
-### 2026-09-25 实测：opencode-zen `space-bunny-free`
+### 实测案例：opencode-zen `space-bunny-free` = MiniMax-M3
 
-首个真实验证对象：OpenCode Zen 的官方隐身模型（限时免费、零保留提供商），社区猜测为 MiniMax 新模型（未经证实）。用归属引擎自己的探针包，经 opencode-zen API 直采三轮输出（自然任务 / glitch 电池 / 字母计数），喂给与面板完全相同的代码路径：
+OpenCode Zen 的官方隐身模型（限时免费、零保留提供商），社区猜测为 MiniMax 新模型。用本插件的探针包直连 API 采集三轮输出跑面板同款代码路径：轨迹指纹全中（`We need` 电报体，efficient 18 / `let me` 0）但按行业级风格降权处理；无任何 tier-1 泄漏、glitch 逐字复读、字母计数答对 22——被动面诚实输出「未匹配」。**最终由 fertility 指纹定量定案**（见下）：五维 usage 差分向量与 MiniMax-M3 官方 tokenizer **精确一致（L1=0）**，其余 8 家全部偏离（llama 4、deepseek-v4 14、glm 16、ling/qwen 32、gemma 40、mistral 51）。
 
-- **轨迹指纹全中**：reasoning 全程 `We need … Need …` 电报体（efficient 18 / `let me` 0 / 裸 `we` 16），`traj-minimal` 点火；灰测正确 miss（无 `I'm doing`）。
-- **无任何 tier-1 泄漏**：无 antml、无 `fp_`、异常探测器零命中——输出非常干净。
-- **glitch 电池无退化**：`SolidGoldMagikarp` 等金丝雀逐字复述（引擎把 prompt 回声记为 tier-3 弱证据）；字母计数答出正确的 22。
-- **引擎结论**：仅 deepseek「疑似」（轨迹行）——而该模型社区猜测是 MiniMax。这次假阳性直接证明：**轨迹词汇是行业级后训练风格，不能单独驱动判定**。`ATTRIBUTION_VERSION = 2` 据此把轨迹行降为纯支持性证据（权重 3→1），并把 MiniMax 加入厂商槽位，等社区采到 MiniMax 侧的真实工件（泄漏串 / 工具命名）再入表。
+### Fertility 指纹工具链（drill 模式，直连 API）
 
-- **引擎结论**：仅 deepseek「疑似」（轨迹行）——而该模型社区猜测是 MiniMax。这次假阳性直接证明：**轨迹词汇是行业级后训练风格，不能单独驱动判定**。`ATTRIBUTION_VERSION = 2` 据此把轨迹行降为纯支持性证据（权重 3→1），并把 MiniMax 加入厂商槽位，等社区采到 MiniMax 侧的真实工件（泄漏串 / 工具命名）再入表。
+被动面板拿不到 usage 字段，仓库根另附一套直连 API 的定量工具：
 
-### Fertility 指纹：space-bunny-free = MiniMax-M3 tokenizer（定量实锤）
+1. [`fingerprint-texts.json`](fingerprint-texts.json) —— 固定探针文本组 T0–T5（英文/中文/代码/多语言 emoji/数字 URL，最大化分词器分歧）；
+2. [`fingerprint-drill.mjs`](fingerprint-drill.mjs) —— 逐条发送并记录 `usage.prompt_tokens`；网关模板开销恒定，**相邻差分剔除模板、隔离分词器本身**。快照按时间落盘 `.attr-corpus/fingerprints/`，跨期对比即模型替换审计。运行：`OPENCODE_ZEN_API_KEY=… node fingerprint-drill.mjs <model>`；
+3. [`fingerprint-reference.py`](fingerprint-reference.py) —— 用各家官方 `tokenizer.json`（python [tokenizers](https://pypi.org/project/tokenizers/) 库，参考文件在 `.attr-corpus/tokenizers-json/`）本地算同一组文本的差分向量并排名比对。
 
-被动面之外，仓库自带一组 **usage-delta fertility 指纹工具**（drill 模式，直连 API）：
+Anthropic 与 OpenAI 不公开 tokenizer——前者由 antml 工件行覆盖，后者由 `fp_…` 行与 glitch 电池覆盖。
 
-1. [`fingerprint-texts.json`](fingerprint-texts.json) —— 固定探针文本组 T0…T5（英文/中文/代码/多语言 emoji/数字 URL，最大化分词器分歧）；
-2. [`fingerprint-drill.mjs`](fingerprint-drill.mjs) —— 对目标模型逐条发送并记录 `usage.prompt_tokens`；网关的模板开销恒定，**相邻差分即剔除模板、隔离分词器本身**（`OPENCODE_ZEN_API_KEY=… node fingerprint-drill.mjs <model>`，快照存 `.attr-corpus/fingerprints/`，跨时间对比即可做模型替换审计）；
-3. [`fingerprint-reference.py`](fingerprint-reference.py) —— 用 9 家官方 `tokenizer.json`（tokenizers 库）本地算同一组文本的差分向量并排名比对。
+## 0813 轨迹分类器与灰测特征
 
-**2026-09-25 实测结果（space-bunny-free）**：
+轨迹/灰测两层保留为面板的支持性证据区，方法与证据链完整记录在 [`docs/research.md`](docs/research.md)：
 
-| 候选 tokenizer | 差分 L1 距离 |
-|---|---:|
-| **minimax-m3** | **0（精确匹配）** |
-| llama | 4 |
-| deepseek-v4 | 14 |
-| glm | 16 |
-| ling / qwen | 32 |
-| gemma | 40 |
-| mistral | 51 |
-
-五维差分向量 `T1:38 T2:76 T3:45 T4:60 T5:64` 与 **MiniMax-M3 官方 tokenizer 完全一致**，其余 8 家全部偏离——社区「space-bunny 是 MiniMax 新模型」的猜测获得可复现的定量证据（指纹指向分词器/服务栈；结合 We-need 风格与行为特征，权重替换的可能性的极低）。阳性对照受限：ling-3.0 为 free-tier 仅限 OpenCode 客户端调用（403）；Kimi-K3 未发布 tokenizer.json，K2-Thinking 参考已尽可能补充。
+- **0813 轨迹分类器**：统计推理块中 `We need…` / `Let's…`（🟢 高效）、`Let me…` / `I think…`（🟠 犹豫）、`The user wants…`（⚪ 中性）的出现频次，依据 [xiaobright/modeltest](https://github.com/xiaobright/modeltest) 对 DeepSeek V4 Pro GA「0813」后训练过拟合事件的公开调研。词频只反映推理**风格**，不能判定后端或 checkpoint——因此在归属评分中仅作支持性证据。
+- **灰测特征**：对每个助手轮独立打分——`I'm doing` +4、开场即 `I'm doing` +2、概要形 CoT（列表行 ≥35%）+2、脏 token +2、泄漏 `fp_…` +2、TTFT 超过本会话动态线 +1；`Let me ≥ 2` 且无 I'm doing −3、裸 `we ≥ 3` −1。`score ≥ 5` 命中、`≥ 2` 疑似。TTFT 动态线由会话自身历史轮估计网络质量（中位数/p90/吐字速率），抗慢链路误报。校准：`pnpm calibrate`（社区正例必须命中，modeltest 冻结的 11 条负例不得到达 likely）。
 
 ## 安装
 
-**前置条件**：已安装 dsh CLI ≥ **0.1.0-rc.7**（`dsh --version`），并已建好目标 profile。ModelTester 按 dsh **0.1.x** 的客户端契约构建：同时兼容 **rc.7、rc.8、0.1.1-rc.x、0.1.2-rc.1、0.1.3-alpha.x、0.1.5-rc.x、0.1.6-alpha.1，以及 0.1.7 全线（alpha.1、alpha.2、rc.1、rc.2）**。更早的 rc 版本未保证兼容。逐版本的精确兼容声明（DSH STORE `dsh.compatibility.dshReleases` 矩阵）以本仓库 `package.json` 为准：0.1.6-alpha.1 与 0.1.7-rc.1 为真实 Profile 实测，0.1.7-alpha.1、0.1.7-alpha.2、0.1.7-rc.2 为静态契约探针实测（平台种子表、`shell.overlay`、`chat.legacy` 切片、SessionFace 四项逐版本比对通过）。
+**前置条件**：dsh CLI ≥ **0.1.0-rc.7**，已建好目标 profile。本插件按 dsh **0.1.x** 客户端契约构建（rc.7 至 0.1.7 全线），逐版本精确兼容声明以 [`package.json`](package.json) 的 `dsh.compatibility.dshReleases` 矩阵为准。
 
-**方式一 · npm 安装（推荐）** —— `dsh-modeltester` 已发布到 npm，预构建安装，无需 `allowBuilds` 审批
+**方式一 · npm 安装（推荐）** —— 预构建，无需 `allowBuilds` 审批
 
 ```sh
 dsh plugin --profile demo add dsh-modeltester
 ```
 
-安装后即可在网页端右上角看到面板。
-
-**方式二 · 从 GitHub 直接安装**（`prepare` 脚本会在安装时自动构建 `lib/`）
+**方式二 · 从 GitHub 安装**（`prepare` 脚本安装时自动构建 `lib/`）
 
 ```sh
 dsh plugin --profile demo add github:Yuer6327/ModelTester
 ```
 
-> pnpm ≥ 10 默认拦截 git 依赖的 `prepare` 脚本。先把 pnpm 提示的包名写入该 profile 的 `pnpm-workspace.yaml`，再重新执行 `add`：
+> pnpm ≥ 10 默认拦截 git 依赖的 `prepare` 脚本：把 `dsh-modeltester: true` 写入该 profile 的 `pnpm-workspace.yaml` 后重新 `add`。
 
 **方式三 · 本地目录安装**
 
 ```sh
-cd /path/to/this/repo/..            # 进入 ModelTester/ 所在目录的上级
+cd /path/to/this/repo/..
 dsh plugin --profile demo add ./ModelTester
-dsh web --profile demo              # 或直接：dsh --profile demo
+dsh web --profile demo
 ```
->
-> ```yaml
-> allowBuilds:
->   dsh-modeltester: true
-> ```
-
-**原理**：`cordis.patch.yml` 这层在组合里插入 `dsh-modeltester` 行；`package.json` 的 `dsh.client` 块告诉网页壳加载浏览器包。包根另有 [dsh-std](https://github.com/Yan-Zero/dsh-std) Community v0.15 静态清单 `dsh-plugin.json`（`facets.host.entry` → `lib/std/host.js`），给 `@dsh-std/adapter-dsh` 等标准宿主做安装前兼容判定与 inventory；**面板本身仍走原生 `dsh.client`**——Community v0.15 / `browser.ui.dsh/v1alpha1` 目前只有 `SettingsSection` 与 `ToolCallView`，没有 `shell.overlay` 对应 surface，所以标准宿主不会重挂这块面板。
-
-标准宿主侧可先装 adapter 再装本包（adapter 扫描 profile 依赖里的 `dsh-plugin.json`）：
-
-```sh
-dsh plugin --profile demo add @dsh-std/adapter-dsh
-dsh plugin --profile demo add dsh-modeltester
-```
-
-> **Windows 注意**：`cordis.patch.yml` 的行名用的是包名 `dsh-modeltester`，因此只有把该包装入 profile 后悬浮层才生效。行名写成原始绝对路径会失败 —— ESM loader 拒绝 `D:\…` 入口名（`ERR_UNSUPPORTED_ESM_URL_SCHEME`）；Linux 下可用 `file://` URL 替代。
 
 **本地开发**：
 
 ```sh
 pnpm install && pnpm build
-dsh web --patch 'D:/OneDrive/桌面/play/codes/dsh-plugin/ModelTester/cordis.patch.yml'
+dsh web --patch '…/ModelTester/cordis.patch.yml'
 ```
 
-## 使用
+> `cordis.patch.yml` 的行名是包名 `dsh-modeltester`；Windows 下行名写绝对路径会被 ESM loader 拒绝（`ERR_UNSUPPORTED_ESM_URL_SCHEME`）。
 
-- 面板停靠于会话标题栏下方右上角（避开「Session log」下载按钮），浮在对话框上。
-- **折叠**时是圆角胶囊（圆点 + "ModelTester" + 当前最像厂商；灰测特征强或轨迹模式时显示对应态）。**展开**后：状态条、归属排名与证据账本（带指向 [归属分析](#attribution) 的 `?` 链接与证据包导出）、灰测特征行与风格数字、轨迹模式、占比条、`we · let's · let me · I`、关键词明细、探针包、犹豫压力。方法说明不进面板。
-- 胶囊↔卡片是同一表面的临界阻尼弹簧形变（可打断、锚定右 dock），`prefers-reduced-motion` 下降级为瞬时切换；开合状态会被记住。
-
-### 数据口径、持久化与隐私
-
-- **只统计推理，与证据一致**：关键词只对**推理块**计数。灰测与风格数字同样扫**已加载的全部 reasoning**（含历史与当前 `partial`），不看 text。若推理块缺失/极少，面板只报健康告警和原始计数，不拿文本凑数。0813 会话分类器保持原样。
-- **实时**：每个流式推理增量做增量折叠（每帧至多一次），从不整段重扫会话。
-- **切换会话**：立即用本地缓存重绘新会话统计，再翻页载入**完整历史**（期间显示「同步中」指示）。
-- **本地持久化**：每个会话的折叠计数存于 `localStorage`（`dsh-modeltester.stats.<sessionId>`），重开会话不重新计数，只折叠新增消息。
-- **健壮性**：压缩重写只重置计数一次；历史翻页有上限、切换离开即中止；存储失败被吞掉。
-- 数据不离开你的浏览器。
+标准宿主（[dsh-std](https://github.com/Yan-Zero/dsh-std) Community v0.15）可先装 `@dsh-std/adapter-dsh` 再装本包——`dsh-plugin.json` 提供安装前兼容判定；面板本身仍走原生 `dsh.client`（v0.15 尚无 `shell.overlay` 对应 surface）。
 
 ## 构建
 
 ```sh
-pnpm install      # devDependencies：tsdown、lightningcss、typescript、react types
-pnpm typecheck    # 可选；tsc --noEmit
-pnpm test         # 计数引擎 + 灰测探针 + dsh-std Community v0.15 清单契约
+pnpm install
+pnpm typecheck    # tsc --noEmit
+pnpm test         # 计数引擎 + 归属引擎 + dsh-std 清单契约
 pnpm calibrate    # 灰测阈值校准（克隆 modeltest 冻结聚合做负样本回归）
-pnpm build        # tsdown → lib/index.js（node 半边）+ lib/std/host.js（dsh-std facet）+ lib/client.js（浏览器包）
-pnpm dsh-releases check   # 对比 DSH STORE 最新三版滚动窗口与 dshReleases 矩阵（退出码 2 = 有未声明版本）
-pnpm dsh-releases probe <dsh版本>…  # 对指定 dsh 发行版逐项跑静态契约探针（种子表/shell.overlay/chat.legacy/SessionFace）
+pnpm compat       # dsh 0.1.x 平台种子契约
+pnpm build        # tsdown → lib/index.js + lib/std/host.js + lib/client.js
+pnpm dsh-releases check   # DSH STORE 滚动窗口 vs dshReleases 矩阵
 ```
 
-`verify-dsh-releases.mjs` 是 `dshReleases` 矩阵的证据工具：DSH STORE 的滚动窗口取 `@deepseek-ai/dsh` 按发布时间最新的三个非弃用发行版，窗口内任一版本缺精确 `compatible` 记录条目就会被暂时下架。探针通过只构成静态发行物证据，不等于真实 Profile 实机验收。
-
-客户端依赖（`@deepseek-ai/dsh-client-*`）只用于**构建与类型检查**，精确锁在 **0.1.7-rc.2**（npm `@deepseek-ai/dsh` 的 `next` 标签；`latest` 现为 0.1.5-rc.3、`alpha` 为 0.1.7-alpha.2）。它们不进运行时产物——`lib/client.js` 除宿主种子模块外不带任何 `@deepseek-ai/*` 依赖，**跨版本兼容由结构读取保证，而不是由依赖范围保证**。浏览器包只 `require` rc.7∩rc.8∩0.1.1∩0.1.2∩0.1.3∩0.1.5∩0.1.6∩0.1.7 的平台种子模块（`react`、`cordis`、`dsh-client-ui-slots`、`dsh-client-ui-primitives`）；宿主种子表自 0.1.6 起扩到 9 项（新增 `dsh-client-ui-dockkit`，0.1.7 未变），那 7 项始终是子集，所以既**不** `require` 0.1.2 新增的 `dsh-client-store`，也**不** `require` `dsh-client-ui-dockkit`（旧宿主种子表没有它们）。会话快照按结构子集读取：rc.7–0.1.1 用顶层 `nodes`/`partial`（必要时回退 `chat.legacy`）；0.1.2+ 把节点从 `SessionFace` 拆到 `uiConversation.views.get('chat').legacy`（0.1.6/0.1.7 下该切片为 `{nodes, turnTimings, turnEnds, partial, runningCalls}`，`nodes`/`partial` 语义未变，新增的两个 Map 未被用到），插件惰性合并两路，且 `dsh.client.inject` 不再列出已删除的 `dsh-client-runtime`（否则新宿主组图会失败）。旧宿主仍通过 cordis `sessions` 服务等待，不依赖 graph 边。
-
-**0.1.7 新增的插件版本闸门对本插件不生效。** 宿主在安装与启动时调用 `evaluatePluginCompatibility()`，把插件 `package.json` 里**声明为 `peerDependencies` 的 `@deepseek-ai/dsh` / `@deepseek-ai/dsh-*` 范围**与运行中的 dsh 版本比对（`semver.satisfies`，prerelease 参与比较；`workspace:^`/`~`/`*` 视作当前运行时），不满足则拒绝安装/启动，并给出 `dsh plugin allow-version <pkg@version> --dsh-version <exact> --accept-risk` 这一**精确到 `插件@版本 × dsh 版本`** 的例外入口（`version-exemptions` 可查、`revoke-version` 可撤）。该检查**只在插件存在 `peerDependencies` 字段时才生效**——没有该字段直接返回 `undefined`，不做任何校验。ModelTester 不声明任何 dsh peer，因此不会被这个闸门拦住；这也是刻意的：它的兼容性来自上面的结构读取，而不是版本区间。
-
-0.1.7-rc.1 的其余宿主侧变更（Session 日志升 V4 与批量迁移、Agent 生命周期/会话历史/Shell 沙箱接口异步化、设置改由 Profile 插件配置保存、Agent 预设改由插件组合包声明、PTC 运行时与工作流执行器改名、工具返回按统一 token 预算截断、Windows 沙箱越界删除修复等）均不触及本插件：`shell.overlay` 仍是 `{kind:'list', scope:'root'}`（0.1.7 另加 `shell.leading` 槽，纯增量），`dsh.client` 键、`__ModuleLoader__.load` 契约与 assistant `{kind,seq,blocks}` + `timing.{stepStartTime,firstTokenTime,completedTime}` 结构均未变。
-
-**0.1.7-rc.1 实测（0.3.8）。** 对已安装的 0.1.7-rc.1 逐项核对：宿主前端种子表仍为 9 项（与 0.1.6 相同，本插件声明的 7 项是子集）；`shell.overlay` 声明与 `chat.legacy` 切片（`nodes`/`partial`/`turnTimings`/`turnEnds`/`runningCalls`）、`SessionFace = ISession & ObservableSnapshot<SessionSnapshot>` 均未变；`evaluatePluginCompatibility()` 对 `dsh-modeltester@0.3.8` 返回 `undefined`（无 `peerDependencies` → 跳过），并用对照组确认 `<0.1.6`、`^0.2.0` 会被判为 `BLOCK`。实机 `dsh --profile web --port 3160` 下 boot manifest 条目为 `{id: dsh-modeltester, inject: ['@deepseek-ai/dsh-client-locale','@deepseek-ai/dsh-client-ui-layout'], immediately: true}`，包以 `plugins/??dsh-modeltester/client.js&rev=…` 合并形式下发（94540 B，只 `require` `react` 与 `react/jsx-runtime`）；headless Edge（CDP）面板渲染成功、卡片 302×117 ↔ 胶囊 97×38（radius 10px）形变通过、**零 console 报错**。**未覆盖**：真实会话的计数链路——0.1.7 的 web profile 停在首次运行的 API Key 配置引导上，没有可打开的会话，因此空状态（`暂无会话`）之外的计数未经实机验证，逻辑正确性仍由 `pnpm test` 的折叠/灰测单测覆盖。
-
-**0.1.7 全线静态契约探针（0.3.9）。** 对 npm 发行物逐版本下载比对 `0.1.7-alpha.1`、`0.1.7-alpha.2`、`0.1.7-rc.1`、`0.1.7-rc.2` 四个版本中本插件依赖的全部契约面：`dsh-web-frontend` 平台种子表（9 项，本插件 `require` 的 7 项齐全）、`dsh-client-ui-layout` 的 `shell.overlay` 槽声明（仍为 `{kind:'list', scope:'root'}`）、`dsh-client-ui-chat` 的 `chat.legacy` 切片（仍为 `{nodes, turnTimings, turnEnds, partial, runningCalls}`）、`dsh-api-session-controller` 的 `SessionFace = ISession & ObservableSnapshot<SessionSnapshot>` 与 `loadOlder()`（仅文档注释与分页粒度说明有差异）。四项探针在四个版本上结果完全一致，与 rc.1 实测基线吻合，故 `package.json` 的 `dshReleases` 矩阵将 0.1.7 全线声明为 `compatible`；alpha.1/alpha.2/rc.2 为静态证据，未经真实 Profile 实机验证。
-
-> ⚠️ 这些包在 npm 的 `latest` 标签常常滞后（多数 client 包 `latest` 仍可能是 `0.0.1-rc.1`，而 `@deepseek-ai/dsh` 的 `latest` 现为 0.1.5-rc.3、`next` 为 0.1.7-rc.2、`alpha` 为 0.1.7-alpha.2）。升级依赖时请显式写具体版本或 `alpha`/`next` 标签，**不要用 `@latest`**。
-
-> dsh CLI 升级后无需重装 profile：基底包（`dsh-base`、`dsh-web-app` 等）按"安装优先"从 CLI 自身解析，profile 里的行会自动跟到新版本。
-
-浏览器包是 `window.__ModuleLoader__.load(...)` 闭包工厂产物（与 harness 自带的 `clientBundle` 预设同形）：平台模块走冻结模块表解析，其余内联，`*.module.css` 编译成哈希类名映射并自动注入样式。
+发布：push 到 main 即 CI 验证并自动 `pnpm publish`（幂等——版本已在 npm 则跳过；`NPM_TOKEN` secret 未配置时发布步骤自动跳过）。
 
 ## 架构
 
 ```
 src/
 ├── index.ts            # Node（宿主）半边 —— 空操作，满足 Loader
-├── std/host.ts         # dsh-std Community v0.15 FacetModule（无 @deepseek-ai/*）
+├── std/host.ts         # dsh-std Community v0.15 FacetModule
 └── client/
-    ├── index.ts        # 浏览器包入口（apply/inject）
-    ├── apply.ts        # 注册 shell.overlay 入口 + 统计 store
-    ├── slots.ts        # inject-face + composed-props 契约
-    ├── conversation.ts   # 宿主快照结构子集（nodes/partial、chat.legacy、或 0.1.2+ uiConversation）
-    ├── session-source.ts # 当前会话 ConversationView 可观察源
-    ├── session-store.ts  # 统计 store：实时折叠、全历史翻页、持久化
-    ├── accumulator.ts  # 每会话增量折叠 + 压缩 + 序列化
-    ├── keywords.ts     # 有研究依据的 0813 关键词表
-    ├── stats.ts        # 计数引擎（最长匹配遍历、按块缓存）
-    ├── graytest.ts     # 本轮灰测探针（I'm doing / 概要形 / 脏 token / fp_）
+    ├── apply.ts        # shell.overlay 注册 + 统计 store
+    ├── slots.ts        # inject-face 契约
+    ├── conversation.ts # 宿主快照结构子集（跨 0.1.x 版本）
+    ├── session-source.ts / session-store.ts / accumulator.ts
+    ├── stats.ts        # 计数引擎（0813 轨迹词汇 + 风格统计）
+    ├── keywords.ts     # 0813 关键词表
+    ├── graytest.ts / gray-signals.ts   # 灰测逐轮探针 + 信号表
+    ├── attribution.ts / attribution-signals.ts  # 归属引擎 + 证据→厂商表
+    ├── tokenizers.ts   # 各家官方 tokenizer 特征集（最新代）
+    ├── probes.ts       # 探针包目录
     ├── ModelTesterPanel.tsx / .module.css
     └── locales.ts      # zh + en 词典
 ```
 
-推理流以 `reasoning-delta` 分块到达，会话层累加进 `partial`（每动画帧至多发布一次），落定的轮次进 `nodes`。rc.8 起宿主另有 `chat`/`views`，顶层 `nodes`/`partial` 仍是 0.1.1 的兼容切片；0.1.2 删除 `dsh-client-runtime`，节点改由 `uiConversation` 发布为 `views.get('chat').legacy`，`SessionFace` 只留 `openState`/`hasMore`/`loadOlder`。`conversationViewOf` 合并这两路。0.1.5 把原 `conversation` Slot 迁到 `main` 的 `conversation` key，并新增 `sidebar.panellist`；0.1.6 在该切片旁加了 `turnTimings`/`turnEnds`，0.1.7 未再改该切片；`nodes`/`partial` 与 assistant `{kind,seq,blocks}`、`timing.{stepStartTime,firstTokenTime,completedTime}` 结构自 0.1.2 起始终未变；`shell.overlay` 一直是布局的帧级纯增量席位（0.1.7 另加同级的 `shell.leading`），面板不迁。统计 store 对两路快照都做**增量**折叠（按块身份缓存计数，新节点由 seq 高水位门控），发布现成的 `TrajectoryStats` —— 面板从不整段重算会话。面板样式镜像 DetailsPanel。
+仓库根另有开发工具：`verify-*.mjs`（契约/校准/冒烟）、`fingerprint-*.json/.mjs/.py`（fertility 指纹 drill）。
+
+## 兼容性
+
+- dsh `>=0.1.0-rc.7 <0.2.0`；客户端依赖仅用于构建与类型检查（精确锁 0.1.7-rc.2），不进运行时产物——跨版本兼容由结构读取保证。
+- 兼容性证据工具：`pnpm dsh-releases check` / `pnpm dsh-releases probe <版本>…`（静态发行物比对：平台种子表、`shell.overlay`、`chat.legacy` 切片、`SessionFace`）。
+- 本插件不声明任何 dsh `peerDependencies`，0.1.7 的 `evaluatePluginCompatibility()` 版本闸门因此不生效（兼容性来自结构读取，而非版本区间）。
+
+## 诚实边界
+
+- **结构指纹 ≠ 模型身份**。归属排名回答「像谁」，不回答「是谁」：`antml` 这类工件可能来自**脚手架**而非底座模型；轨迹词汇是行业级后训练风格（2026-09-25 实测：社区猜测为 MiniMax 的隐身模型与 DeepSeek 0813 呈同一 `We need` 风格，故该行降为支持性）；风格标记是社区轶事级证据，checkpoint 漂移会改变风格。
+- 灰测命中只表示「某轮 reasoning 像社区灰测簇」，不能据此断言路由到了哪家模型、哪个 checkpoint、哪台机器。
+- 面板所有数字（I'm doing、列表密度、p50、TTR、TTFT）始终与结论并列显示，判断留给用户；数据不离开浏览器（fertility drill 为仓库级开发工具，独立于面板运行）。
 
 ## 许可证
 

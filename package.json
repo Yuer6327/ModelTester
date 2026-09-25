@@ -1,7 +1,7 @@
 {
   "name": "dsh-modeltester",
-  "version": "0.0.3-alpha.5",
-  "description": "ModelTester — real-time reasoning-trajectory keyword stats for the DeepSeek Harness web chat. Tracks the We-need/Let's efficient trajectory vs the Let-me hesitant trajectory vs the The-user-wants neutral framing in the model's streaming reasoning blocks.",
+  "version": "0.0.4-alpha.1",
+  "description": "ModelTester — model detection & attribution panel for the DeepSeek Harness web chat. Ranks vendor families (DeepSeek / Anthropic / OpenAI / Google / Qwen / GLM / Kimi / MiniMax / Llama / Mistral / Ling) from structural fingerprints — template & tokenizer leaks, dirty tokens, trajectory vocabulary, probe canaries — with a full evidence ledger, gray-test signal detection, and a usage-delta fertility drill for quantitative tokenizer identification.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -37,9 +37,13 @@
     "community-v0.15",
     "deepseek-harness",
     "deepseek",
+    "model-detection",
+    "attribution",
+    "fingerprint",
+    "tokenizer",
+    "gray-test",
     "reasoning",
-    "chain-of-thought",
-    "trajectory"
+    "chain-of-thought"
   ],
   "repository": {
     "type": "git",

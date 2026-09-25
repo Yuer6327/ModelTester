@@ -4,8 +4,8 @@ export const NS = 'modeltester'
 
 /** Simplified-Chinese UI messages. */
 export const zh = {
-  'panel.title': 'ModelTester · 推理轨迹',
-  'panel.aria': 'ModelTester 推理关键词统计',
+  'panel.title': 'ModelTester · 模型检测',
+  'panel.aria': 'ModelTester 模型检测面板',
   'panel.collapse': '收起',
   'panel.expand': '展开',
   'panel.noSession': '暂无会话，打开一个会话后实时统计',
@@ -27,7 +27,7 @@ export const zh = {
   'panel.reasoningLow': 'reasoning 块极少',
   'panel.reasoningAlertHint': '无 reasoning 可依，词频无法统计。',
   'panel.avg': '均值',
-  'panel.modeLabel': '轨迹模式',
+  'panel.modeLabel': '轨迹特征',
   'panel.patternsLabel': '关键词明细',
   'panel.healthLabel': '犹豫压力',
   'panel.health.low': '直接行动',
@@ -158,8 +158,8 @@ export const zh = {
 
 /** English UI messages. */
 export const en = {
-  'panel.title': 'ModelTester · Reasoning',
-  'panel.aria': 'ModelTester reasoning keyword stats',
+  'panel.title': 'ModelTester · Model Detection',
+  'panel.aria': 'ModelTester model detection panel',
   'panel.collapse': 'Collapse',
   'panel.expand': 'Expand',
   'panel.noSession': 'No active session — open one to start live stats',
@@ -181,7 +181,7 @@ export const en = {
   'panel.reasoningLow': 'Very few reasoning blocks',
   'panel.reasoningAlertHint': 'No reasoning to count.',
   'panel.avg': 'avg',
-  'panel.modeLabel': 'Trajectory mode',
+  'panel.modeLabel': 'Trajectory fingerprint',
   'panel.patternsLabel': 'Keyword breakdown',
   'panel.healthLabel': 'Hesitation pressure',
   'panel.health.low': 'direct action',
