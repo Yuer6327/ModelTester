@@ -1,0 +1,10 @@
+# ModelTester bundle layer: add the ModelTester web panel to the dsh composition.
+#
+# The row names the package, so it resolves only when `dsh-modeltester` is
+# installed into the profile (`dsh plugin --profile <name> add ./ModelTester`).
+# A raw absolute Windows path as `name` fails in the ESM loader
+# (ERR_UNSUPPORTED_ESM_URL_SCHEME); on Linux a file:// URL works.
+
+- insert:
+    - id: modeltester
+      name: dsh-modeltester

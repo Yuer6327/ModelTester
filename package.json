@@ -1,0 +1,94 @@
+{
+  "name": "dsh-modeltester",
+  "version": "0.0.1-alpha.1",
+  "description": "ModelTester — real-time reasoning-trajectory keyword stats for the DeepSeek Harness web chat. Tracks the We-need/Let's efficient trajectory vs the Let-me hesitant trajectory vs the The-user-wants neutral framing in the model's streaming reasoning blocks.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "dsh-plugin.json",
+    "cordis.patch.yml",
+    "README.md",
+    "docs"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "prepare": "pnpm build",
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types verify.mjs && node --experimental-strip-types verify-dsh-std.mjs",
+    "calibrate": "node verify-gray-calibration.mjs",
+    "compat": "node verify-dsh-host.mjs",
+    "dsh-releases": "node verify-dsh-releases.mjs"
+  },
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "dsh-std",
+    "community-v0.15",
+    "deepseek-harness",
+    "deepseek",
+    "reasoning",
+    "chain-of-thought",
+    "trajectory"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Yuer6327/ModelTester.git"
+  },
+  "author": "Yuer6327",
+  "engines": {
+    "node": ">=22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "~4.0.4",
+    "@deepseek-ai/dsh-brand": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-locale": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-store": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-layout": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.7-rc.2",
+    "@types/node": "^22.0.0",
+    "@types/react": "~18.3.1",
+    "@types/react-dom": "~18.3.0",
+    "lightningcss": "^1.32.0",
+    "react": "^18.2.0",
+    "tsdown": "^0.22.2",
+    "typescript": "^6.0.3"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-layout"
+      ],
+      "immediately": true
+    },
+    "compatibility": {
+      "dsh": ">=0.1.0-rc.7 <0.2.0",
+      "dshReleases": {
+        "0.1.6-alpha.1": "compatible",
+        "0.1.7-alpha.1": "compatible",
+        "0.1.7-alpha.2": "compatible",
+        "0.1.7-rc.1": "compatible",
+        "0.1.7-rc.2": "compatible"
+      }
+    }
+  }
+}

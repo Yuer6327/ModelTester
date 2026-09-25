@@ -1,0 +1,537 @@
+/* ModelTester reasoning-trajectory panel.
+   One element, two rounded-rectangle shapes: a compact chip when collapsed,
+   a rounded card when expanded, morphed by a spring driven from inline
+   width/height/border-radius (see ModelTesterPanel.tsx). Anchored below the
+   session header (clears the "Session log" download action) at the right
+   dock, growing leftward from the edge.
+
+   Token-only styling mirroring DetailsPanel.module.css (--dsw-alias-* semantic
+   aliases, theme shadows/fonts); light/dark flips ride the theme owner. The
+   body's scrollbar is hover-revealed by rebinding the harness's own
+   --dsh-scrollbar-* tokens (the elevated-surface pattern), so it renders as
+   the themed slim thumb only while the surface is hovered/focused. */
+
+.root {
+  position: fixed;
+  top: 56px; /* below the session header's 32px action buttons */
+  right: 16px;
+  z-index: 40; /* above the overlay layer's own stacking of sibling entries */
+  --modeltester-max: min(560px, calc(100vh - 32px));
+  overflow: hidden; /* clips both layers to the morphing outline */
+  background: var(--dsw-alias-bg-overlay);
+  border: 1px solid var(--dsw-alias-border-l2);
+  box-shadow: var(--dsw-shadow-lv3);
+  color: var(--dsw-alias-label-primary);
+  pointer-events: auto;
+  will-change: width, height, border-radius;
+}
+
+/* --- collapsed chip (the whole surface is the button) --- */
+
+.chip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.chip:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.chipDot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.chipDot[data-mode='efficient'] {
+  background: var(--dsw-alias-state-success-primary);
+}
+
+.chipDot[data-mode='hesitant'] {
+  background: var(--dsw-alias-state-warn-primary);
+}
+
+.chipDot[data-mode='neutral'] {
+  background: var(--dsw-alias-label-secondary);
+}
+
+.chipDot[data-gray='likely'] {
+  background: var(--dsw-alias-brand-primary);
+}
+
+.chipDot[data-gray='possible'] {
+  background: var(--dsw-alias-state-warn-primary);
+}
+
+.chipMode {
+  color: var(--dsw-alias-label-secondary);
+  font-weight: 400;
+}
+
+.chipMode[data-gray='likely'] {
+  color: var(--dsw-alias-brand-primary);
+}
+
+.chipMode[data-gray='possible'] {
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.chip:focus-visible,
+.toggle:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
+}
+
+/* --- expanded card --- */
+
+.card {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 300px;
+  max-height: var(--modeltester-max);
+  display: flex;
+  flex-direction: column;
+}
+
+/* header (figma RightSidebar frame, as DetailsPanel) */
+
+.header {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 14px 12px 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+
+.title {
+  overflow: hidden;
+  margin: 0;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toggle {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.toggle:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+/* body: hover-reveal scrollbar via the harness's elevated-surface rebind */
+
+.body {
+  flex: 1;
+  min-height: 0;
+  padding: 12px 16px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  --dsh-scrollbar-thumb: transparent;
+  --dsh-scrollbar-thumb-hover: transparent;
+}
+
+.body:hover,
+.body:focus-within {
+  --dsh-scrollbar-thumb: var(--dsw-alias-scrollbar-bg-l2);
+  --dsh-scrollbar-thumb-hover: var(--dsw-alias-scrollbar-hover-l2);
+}
+
+.empty {
+  margin: 8px 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+/* --- live status strip --- */
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 10px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--dsw-alias-border-l2);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+}
+
+.statusItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.value {
+  color: var(--dsw-alias-label-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.liveDot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--dsw-alias-state-success-primary);
+}
+
+.liveDot[data-syncing] {
+  background: var(--dsw-alias-state-warn-primary);
+  animation: modeltester-pulse 1.2s var(--ds-ease-in-out) infinite;
+}
+
+.root[data-streaming] .liveDot {
+  animation: modeltester-pulse 1.2s var(--ds-ease-in-out) infinite;
+}
+
+@keyframes modeltester-pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.72); }
+}
+
+/* --- reasoning-health alert --- */
+
+.alert {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  margin-bottom: 12px;
+}
+
+.alertIcon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  border-radius: 999px;
+  background: var(--dsw-alias-state-error-primary);
+  color: var(--dsw-alias-label-primary-inverted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.alertBody {
+  min-width: 0;
+}
+
+.alertTitle {
+  margin: 0 0 4px;
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 600;
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.alertFacts {
+  margin: 0 0 4px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.alertSep {
+  color: var(--dsw-alias-separator-primary);
+  margin: 0 6px;
+}
+
+.alertHint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* --- trajectory mode (label + badge on one row) + share bars --- */
+
+.section {
+  margin-bottom: 14px;
+}
+
+.modeRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.modeLabel {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* Badge is plain colored text (no background) for readable contrast on the
+   panel surface — same idiom as dsh's own state-colored labels. */
+.modeBadge {
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 600;
+}
+
+.grayBadge {
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.grayBadge[data-gray='likely'] {
+  color: var(--dsw-alias-brand-primary);
+}
+
+.grayBadge[data-gray='possible'] {
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.grayBadge[data-gray='miss'] {
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.grayDocs {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin-left: 2px;
+  border-radius: 999px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  color: var(--dsw-alias-label-tertiary);
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.grayDocs:hover {
+  color: var(--dsw-alias-label-primary);
+  border-color: var(--dsw-alias-label-secondary);
+}
+
+.grayDocs:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
+}
+
+.grayFacts {
+  margin: 0 0 6px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.grayCode {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 5px;
+  border-radius: 4px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.patternDot[data-gray='likely'] {
+  background: var(--dsw-alias-brand-primary);
+}
+
+.patternDot[data-gray='possible'] {
+  background: var(--dsw-alias-state-warn-primary);
+}
+
+.sectionLabel {
+  margin-bottom: 6px;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.barRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.barLabel {
+  flex: none;
+  width: 44px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.barTrack {
+  flex: 1;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-1);
+  overflow: hidden;
+}
+
+.barFill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  transition: width var(--ds-transition-duration) var(--ds-ease-in-out);
+}
+
+.barValue {
+  flex: none;
+  width: 44px;
+  text-align: right;
+  color: var(--dsw-alias-label-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- raw research metrics + keyword breakdown --- */
+
+.metrics {
+  display: flex;
+  gap: 10px;
+  padding: 6px 8px;
+  margin-bottom: 8px;
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+}
+
+.metricValue {
+  color: var(--dsw-alias-label-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.patternList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.patternItem {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.patternDot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 2px;
+}
+
+.patternKey {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dsw-alias-label-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.patternCount {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- footer --- */
+
+.footer {
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+
+.healthRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.healthValue {
+  font-weight: 500;
+}
+
+.healthValue[data-health='low'] {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.healthValue[data-health='mid'] {
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.healthValue[data-health='high'] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+/* Reduced motion: no pulse, no width tween, instant morph. */
+@media (prefers-reduced-motion: reduce) {
+  .liveDot,
+  .liveDot[data-syncing],
+  .root[data-streaming] .liveDot {
+    animation: none;
+  }
+
+  .barFill {
+    transition: none;
+  }
+
+  .root {
+    will-change: auto;
+  }
+}

@@ -1,0 +1,96 @@
+/**
+ * ModelTester browser plugin body.
+ *
+ * Registers a `shell.overlay` entry (the layout's frame-wide floating layer —
+ * additive and root-scoped) that hosts the reasoning-trajectory stats panel.
+ * The panel receives the current session's live conversation slice through
+ * an inject `hooks` compartment built over `ctx.sessions` (and, on 0.1.2+,
+ * `ctx.uiConversation` for the nodes that left SessionFace).
+ *
+ * Types come from the intersection of rc.7–0.1.1 (`dsh-client-runtime`) and
+ * 0.1.2+ (`dsh-api-session-controller` + locale + ui-layout). The apply
+ * argument is a structural ClientContext so the file typechecks without
+ * either of those host packages as a value import.
+ */
+
+// Type-only merges: Context.locale (locale plugin) and the `shell.overlay`
+// SlotMap declaration (ui-layout). Both are erased at compile time.
+import type {} from '@deepseek-ai/dsh-client-locale/client'
+import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
+import type { ConversationPort } from './conversation.ts'
+import { ModelTesterPanel } from './ModelTesterPanel.tsx'
+import { createStatsStore } from './session-store.ts'
+import type { ModelTesterFace } from './slots.ts'
+import { en, NS, zh, type ModelTesterKey } from './locales.ts'
+
+declare module '@deepseek-ai/dsh-client-ui-slots' {
+  interface LocaleNamespaceMap {
+    modeltester: ModelTesterKey
+  }
+}
+
+/** Cordis services required by the browser half. */
+export const inject = ['slots', 'sessions', 'locale']
+
+/**
+ * Browser root context as far as apply() is concerned.
+ *
+ * `ClientContext` lived on `@deepseek-ai/dsh-client-runtime/client` through
+ * 0.1.1; 0.1.2 deleted that package. The methods below are the intersection
+ * of the two hosts and are all that apply() calls.
+ */
+interface ClientContext {
+  readonly sessions: import('./conversation.ts').SessionsPort
+  readonly slots: {
+    inject(name: string, callback: () => unknown): unknown
+    register(options: object, component: unknown): unknown
+  }
+  readonly locale: {
+    register(ns: string, dicts: Record<string, unknown>): () => void
+  }
+  effect(callback: () => unknown, name?: string): unknown
+  get(name: string): unknown
+}
+
+/**
+ * Mount the ModelTester panel.
+ * @param ctx - Browser root context.
+ */
+export function apply(ctx: ClientContext): void {
+  // Dictionaries first: the register() locale seat renders through the
+  // locale face, so the namespace must exist before the panel mounts.
+  ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'modeltester: dictionaries')
+
+  // The stats store owns live folding, full-history paging, and persistence.
+  // uiConversation is looked up lazily: it must not be a cordis inject, or
+  // the fiber would hang forever on hosts that never provide it (rc.7–0.1.1).
+  const stats = createStatsStore(
+    ctx.sessions,
+    typeof window === 'undefined' ? undefined : window.localStorage,
+    conversationBindingOf(ctx),
+  )
+
+  // `slots.inject` defers the registration until ui-layout declares
+  // `shell.overlay` (handles boot-order regardless of the graph edge).
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+    name: 'shell.overlay',
+    id: 'modeltester',
+    locale: NS,
+    inject: (): ModelTesterFace => ({ hooks: { stats } }),
+  }, ModelTesterPanel))
+}
+
+/**
+ * Resolve the 0.1.2+ conversation assembly for one session, if the host
+ * provides `ctx.uiConversation`. Missing or throwing is a no-op: rc.7–0.1.1
+ * keep `nodes`/`partial` on SessionFace, so the live source still counts.
+ */
+function conversationBindingOf(ctx: { get: (name: string) => unknown }): (id: string) => ConversationPort | undefined {
+  return (id) => {
+    const ui = ctx.get('uiConversation') as { binding?: (sessionId: string) => ConversationPort } | undefined
+    if (ui === undefined || typeof ui.binding !== 'function') return undefined
+    const binding = ui.binding(id)
+    if (binding === undefined || typeof binding.snapshot?.getSnapshot !== 'function') return undefined
+    return binding
+  }
+}
