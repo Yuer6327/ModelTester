@@ -653,12 +653,16 @@ The user is asking for a quick fix. I think the issue is in the config.
   const fpg = attributeSession(viewOf([asNode('the trace said fp_abc123def0 twice: fp_abc123def0')]), zero)
   check('attr: fp_ → openai likely', fpg.candidates[0]?.vendor === 'openai' && fpg.verdict === 'likely', true)
 
-  // 0813 minimal trajectory → deepseek possible (tier-2 caps below likely).
+  // 0813 minimal trajectory → deepseek support only (since the 2026-09-25
+  // space-bunny-free drill showed the same style on a community-guessed
+  // MiniMax, trajectory vocabulary cannot drive a verdict on its own).
   const minimalText = "We need to inspect the layout. Let's check the config. We should run the tests."
   const minimal = attributeSession(viewOf([asNode(minimalText)]), trajOf(minimalText))
   check('attr: 0813 minimal → deepseek top', minimal.candidates[0]?.vendor, 'deepseek')
-  check('attr: 0813 minimal possible (tier-2 cap)', minimal.candidates[0]?.verdict, 'possible')
+  check('attr: 0813 minimal support-only (no verdict)', minimal.candidates[0]?.verdict, 'none')
   check('attr: 0813 minimal no foreign vendor', minimal.candidates.every(c => c.vendor === 'deepseek'), true)
+  const { VENDORS: attrVendors } = await import('./src/client/attribution-signals.ts')
+  check('attr: minimax vendor slot exists', attrVendors.includes('minimax'), true)
 
   // Unattributed dirty token → ledger without vendor; verdict none; anomaly
   // detector must not double-count the recorded token.
@@ -667,12 +671,27 @@ The user is asking for a quick fix. I think the issue is in the config.
   check('attr: unattributed verdict none', unknown.verdict, 'none')
   check('attr: EDMFunc not double-counted by anomaly detector', unknown.evidence.some(e => e.id === 'anom-ident'), false)
 
+  // Chat-template leaks are tier-1, passive (reasoning surface only).
+  const tmpl = (text) => attributeSession(viewOf([asNode(text)]), zero)
+  const mm = tmpl('<minimax:tool_call> running the tool')
+  check('attr: minimax ns → minimax likely', mm.candidates[0]?.vendor === 'minimax' && mm.verdict === 'likely', true)
+  check('attr: glm observation → zhipu top', tmpl('plan uses <|observation|> next').candidates[0]?.vendor, 'zhipu')
+  const ds = tmpl('user asked; <｜Assistant｜> should reply')
+  check('attr: deepseek template token → deepseek likely', ds.candidates[0]?.vendor === 'deepseek' && ds.verdict === 'likely', true)
+  const inst = tmpl('[INST] echoed frame')
+  check('attr: [INST] credits mistral first', inst.candidates[0]?.vendor, 'mistral')
+  check('attr: [INST] also credits meta', inst.candidates.some(c => c.vendor === 'meta'), true)
+  check('attr: template token quoted in visible text must not fire', attributeSession(viewOf([{
+    kind: 'assistant', seq: 1, turn: 1,
+    blocks: [{ kind: 'text', text: '<|observation|> 是 GLM 的模板 token' }],
+  }]), zero).evidence.some(e => e.id === 'tmpl-glm'), false)
+
   // Probe sentinels are scanned over visible text too.
   const probe = attributeSession(viewOf([{
     kind: 'assistant', seq: 1, turn: 1,
     blocks: [{ kind: 'text', text: 'SolidGoldMagikarp\nMT-ECHO-7f3a9c' }],
   }]), zero)
-  check('attr: glitch canary (visible text)', probe.evidence.some(e => e.id === 'probe-gpt2-glitch'), true)
+  check('attr: glitch canary (visible text)', probe.evidence.some(e => e.id === 'probe-glitch-r50k'), true)
   check('attr: echo sentinel (visible text)', probe.evidence.some(e => e.id === 'probe-echo'), true)
 
   // Anomaly detectors catch unrecorded leaks (unknown namespaced tag, hex run).

@@ -21,12 +21,12 @@
 import type { AssistantBlockView, ConversationView } from './conversation.ts'
 import type { GrayProbe } from './graytest.ts'
 import {
-  ALL_SIGNALS, DERIVED_SIGNALS, SCANNED_SIGNALS, derivedHits,
+  ALL_SIGNALS, ATTRIBUTION_VERSION, DERIVED_SIGNALS, SCANNED_SIGNALS, VENDORS, derivedHits,
   type AttributionSignal, type EvidenceKind, type EvidenceTier, type SignalId, type TrajectoryInput, type Vendor,
 } from './attribution-signals.ts'
 
-/** Version of the attribution table and scoring rules. */
-export const ATTRIBUTION_VERSION = 1 as const
+/** Re-exported table version (single source: attribution-signals.ts). */
+export { ATTRIBUTION_VERSION }
 
 /** Session-level attribution verdict (same wording family as the gray probe). */
 export type AttributionVerdict = 'none' | 'possible' | 'likely'
@@ -240,8 +240,8 @@ function weightOf(signal: AttributionSignal): number {
   return values.length > 0 ? Math.max(...values) : 0
 }
 
-function scoreContribution(signal: AttributionSignal, count: number): number {
-  const weight = weightOf(signal)
+function scoreContribution(signal: AttributionSignal, vendor: Vendor, count: number): number {
+  const weight = signal.vendors[vendor] ?? 0
   if (weight === 0) return 0
   return signal.kind === 'dirty-token' || signal.kind === 'leak'
     ? weight * Math.min(count, COUNT_SATURATION)
@@ -365,13 +365,13 @@ export function attributeSession(
     const signal = SIGNAL_BY_ID.get(entry.id) ?? DERIVED_SIGNALS[entry.id as keyof typeof DERIVED_SIGNALS]
     if (signal === undefined) continue
     for (const [vendor, weight] of Object.entries(signal.vendors) as [Vendor, number][]) {
-      scores.set(vendor, (scores.get(vendor) ?? 0) + scoreContribution(signal, entry.count))
+      scores.set(vendor, (scores.get(vendor) ?? 0) + scoreContribution(signal, vendor, entry.count))
       if (signal.tier === 1) tier1.set(vendor, (tier1.get(vendor) ?? 0) + 1)
     }
   }
 
   const candidates: VendorScore[] = []
-  for (const vendor of ['deepseek', 'anthropic', 'openai', 'google', 'qwen', 'zhipu', 'moonshot'] as Vendor[]) {
+  for (const vendor of VENDORS) {
     const score = scores.get(vendor) ?? 0
     if (score <= 0) continue
     candidates.push({ vendor, score, tier1: tier1.get(vendor) ?? 0, verdict: 'none' })

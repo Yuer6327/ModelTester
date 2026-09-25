@@ -24,26 +24,28 @@ import type { WordCounts } from './stats.ts'
 import type { PatternCounts } from './stats.ts'
 
 /** Version of the attribution table and scoring rules. */
-export const ATTRIBUTION_VERSION = 1 as const
+export const ATTRIBUTION_VERSION = 3 as const
 
 /** Vendor families the evidence table can support. */
-export type Vendor = 'deepseek' | 'anthropic' | 'openai' | 'google' | 'qwen' | 'zhipu' | 'moonshot'
+export type Vendor = 'deepseek' | 'anthropic' | 'openai' | 'google' | 'qwen' | 'zhipu' | 'moonshot' | 'minimax' | 'meta' | 'mistral'
 
 /** Stable union of every signal id (scanned + derived) — also the locale key suffix. */
 export type SignalId =
   | 'antml-ns' | 'fp-v4pro' | 'fp-generic' | 'edm-func' | 'everyday-calc' | 'nameeee'
   | 'style-delve' | 'anom-ns-tag' | 'anom-hex' | 'anom-ident' | 'anom-repeat'
-  | 'probe-gpt2-glitch' | 'probe-echo' | 'probe-cutoff' | 'probe-count'
+  | 'probe-glitch-r50k' | 'probe-glitch-cl100k' | 'probe-echo' | 'probe-cutoff' | 'probe-count'
+  | 'tmpl-minimax' | 'tmpl-kimi' | 'tmpl-glm' | 'tmpl-deepseek' | 'tmpl-llama3' | 'tmpl-llama2'
+  | 'tmpl-inst' | 'tmpl-chatml' | 'tmpl-gemma'
   | 'traj-minimal' | 'traj-standard' | 'style-emdash'
 
 /** Display order (also the tiebreak for equal scores). */
-export const VENDORS: readonly Vendor[] = ['deepseek', 'anthropic', 'openai', 'google', 'qwen', 'zhipu', 'moonshot']
+export const VENDORS: readonly Vendor[] = ['deepseek', 'anthropic', 'openai', 'google', 'qwen', 'zhipu', 'moonshot', 'minimax', 'meta', 'mistral']
 
 /** Evidence strength class. */
 export type EvidenceTier = 1 | 2 | 3
 
 /** What kind of output surface the evidence came from. */
-export type EvidenceKind = 'dirty-token' | 'leak' | 'trajectory' | 'style' | 'probe' | 'anomaly'
+export type EvidenceKind = 'dirty-token' | 'leak' | 'template' | 'trajectory' | 'style' | 'probe' | 'anomaly'
 
 /** One countable fingerprint → vendor mapping. */
 export interface AttributionSignal {
@@ -196,15 +198,118 @@ const anomalySignals: readonly AttributionSignal[] = [
   },
 ]
 
-/** Probe echo rows — the kit prompts (probes.ts) carry these strings; an echo means the probe was exercised. */
+/**
+ * Chat-template leak rows. A special token from the serving template leaking
+ * into reasoning is near-deterministic evidence of the template family (the
+ * same class of artifact as antml). Sources: the vendors' official
+ * `chat_template.jinja` files and the template-leak literature. Scanned over
+ * reasoning only — an answer *quoting* a token (e.g. the recognition probe's
+ * reply) must not fire the row.
+ */
+const templateSignals: readonly AttributionSignal[] = [
+  {
+    id: 'tmpl-minimax',
+    kind: 'template',
+    tier: 1,
+    match: [/<\/?minimax:[\w-]+>/g],
+    vendors: { minimax: 6 },
+    rationale: 'MiniMax-M2 tool-call namespace <minimax:tool_call> — vendor-namespaced tag from the official chat_template.jinja.',
+  },
+  {
+    id: 'tmpl-kimi',
+    kind: 'template',
+    tier: 1,
+    match: [/<\|im_middle\|>/g, /<\|im_user\|>/g, /<\|im_system\|>/g, /<\|media_pad\|>/g],
+    vendors: { moonshot: 6 },
+    rationale: 'Kimi (Moonshot) template tokens — the <|im_middle|>/<|im_user|> variants are specific to the official Kimi-K2 chat_template.jinja.',
+  },
+  {
+    id: 'tmpl-glm',
+    kind: 'template',
+    tier: 1,
+    match: [/<\|observation\|>/g],
+    vendors: { zhipu: 6 },
+    rationale: 'GLM-4.x <|observation|> token — distinctive to Zhipu GLM tool-calling template.',
+  },
+  {
+    id: 'tmpl-deepseek',
+    kind: 'template',
+    tier: 1,
+    match: [/<｜begin▁of▁sentence｜>/g, /<｜Assistant｜>/g, /<｜User｜>/g],
+    vendors: { deepseek: 6 },
+    rationale: 'DeepSeek template tokens with full-width ｜ (U+FF5C) and ▁ (U+2581) — unmistakable DeepSeek tokenizer artifacts.',
+  },
+  {
+    id: 'tmpl-llama3',
+    kind: 'template',
+    tier: 1,
+    match: [/<\|begin_of_text\|>/g, /<\|start_header_id\|>/g, /<\|eot_id\|>/g, /<\|finetune_right_pad_id\|>/g],
+    vendors: { meta: 6 },
+    rationale: 'Llama-3 template tokens (begin_of_text / start_header_id / eot_id).',
+  },
+  {
+    id: 'tmpl-llama2',
+    kind: 'template',
+    tier: 1,
+    match: [/<<SYS>>/g, /<\<SYS\>>>/g],
+    vendors: { meta: 6 },
+    rationale: 'Llama-2 <<SYS>> system marker.',
+  },
+  {
+    id: 'tmpl-inst',
+    kind: 'template',
+    tier: 1,
+    match: [/\[INST\]/g, /\[\/INST\]/g],
+    vendors: { mistral: 5, meta: 3 },
+    rationale: '[INST] template frame — shared by the Mistral and Llama-2 lineages, so both families get support.',
+  },
+  {
+    id: 'tmpl-chatml',
+    kind: 'template',
+    tier: 1,
+    match: [/<\|im_start\|>/g],
+    vendors: { qwen: 5, moonshot: 2 },
+    rationale: 'ChatML <|im_start|> frame — Qwen lineage primary; Kimi reuses the im_ prefix with its own variants (see tmpl-kimi).',
+  },
+  {
+    id: 'tmpl-gemma',
+    kind: 'template',
+    tier: 1,
+    match: [/<start_of_turn>/g, /<end_of_turn>/g],
+    vendors: { google: 6 },
+    rationale: 'Gemma turn markers <start_of_turn>/<end_of_turn>.',
+  },
+]
+
+/**
+ * Glitch-token batteries, split by tokenizer family. Sources: the
+ * SolidGoldMagikarp research (LessWrong, Rumbelow & Watkins), the follow-up
+ * "unspeakable glitch tokens" survey (arXiv:2404.09894) and the garak
+ * scanner's public glitch list. These canaries are cl100k/r50k-era vocabulary
+ * items; a model that *echoes* them cleanly likely does not share that
+ * tokenizer, while degenerate echoing hints it does — the echo itself is only
+ * tier-3 support, the behaviour stays a human judgement.
+ */
 const probeSignals: readonly AttributionSignal[] = [
   {
-    id: 'probe-gpt2-glitch',
+    id: 'probe-glitch-r50k',
     kind: 'probe',
     tier: 3,
-    match: [/\bSolidGoldMagikarp\b/gi, /\bdodekatheon\b/gi, /\bpetertodd\b/gi, new RegExp(PROBE_GLITCH_SENTINEL, 'g')],
+    match: [
+      /\bSolidGoldMagikarp\b/gi, /\bdodekatheon\b/gi, /\bDragonbound\b/gi, /裏覚醒/g,
+      /\bguiActive\b/g, /\bpractition\b/g, /\bTPPStreamerBot\b/g, /\bTheNitromeFan\b/g,
+      /龍喚士/g, /\bSpaceEngineers\b/g,
+    ],
     vendors: { openai: 1 },
-    rationale: 'Tokenizer-glitch canary echoed — GPT-2/cl100k lineage hint; judge the degeneration manually.',
+    rationale: 'GPT-2/r50k-family glitch canaries echoed (garak / SolidGoldMagikarp lists) — clean echo argues against that lineage, degeneration hints at it; judge manually.',
+  },
+  {
+    id: 'probe-glitch-cl100k',
+    kind: 'probe',
+    tier: 3,
+    match: [/\bpetertodd\b/gi, /\b\u30c7\u30e5\u30fc\u30c9\u30a2\u30eb\b/g],
+    vendors: { openai: 1 },
+    rationale: 'cl100k glitch canaries echoed (petertodd / デュードアル from the "unspeakable glitch tokens" survey) — judge manually.',
   },
   {
     id: 'probe-echo',
@@ -236,6 +341,7 @@ const probeSignals: readonly AttributionSignal[] = [
 export const SCANNED_SIGNALS: readonly AttributionSignal[] = [
   ...dirtySignals,
   ...leakSignals,
+  ...templateSignals,
   ...anomalySignals,
   ...probeSignals,
   {
@@ -260,16 +366,16 @@ export const DERIVED_SIGNALS: Readonly<Record<DerivedSignalId, AttributionSignal
     kind: 'trajectory',
     tier: 2,
     match: [],
-    vendors: { deepseek: 3 },
-    rationale: 'We-need/Let\'s minimal-trajectory fingerprint (0813 high-score runs: we + let\'s, zero let me).',
+    vendors: { deepseek: 1 },
+    rationale: 'We-need/Let\'s telegraphic minimal-trajectory fingerprint (0813 high-score runs). 2026-09-25 drill: opencode-zen space-bunny-free (community-guessed MiniMax) reasons in the same style — industry-level post-training style, support only.',
   },
   'traj-standard': {
     id: 'traj-standard',
     kind: 'trajectory',
     tier: 2,
     match: [],
-    vendors: { deepseek: 3 },
-    rationale: 'Let-me-heavy standard-trajectory fingerprint (0813 low-score runs).',
+    vendors: { deepseek: 1 },
+    rationale: 'Let-me-heavy standard-trajectory fingerprint (0813 low-score runs). Same caveat as traj-minimal: style-level, cannot discriminate DeepSeek vs other vendors sharing the recipe.',
   },
   'style-emdash': {
     id: 'style-emdash',

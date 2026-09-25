@@ -15,7 +15,7 @@ import {
 } from './attribution-signals.ts'
 
 /** Stable probe ids — also the locale key suffix. */
-export type ProbeId = 'glitch' | 'echo' | 'count' | 'cutoff'
+export type ProbeId = 'natural' | 'glitch' | 'template' | 'echo' | 'count' | 'cutoff'
 
 /** One copyable probe prompt. */
 export interface ProbeEntry {
@@ -29,15 +29,38 @@ export interface ProbeEntry {
 
 export const PROBES: readonly ProbeEntry[] = [
   {
+    id: 'natural',
+    prompt: 'My Node script fails with ERESOLVE when running pnpm install after I bumped one dependency. Diagnose the likely causes and outline the fix steps.',
+    sentinels: [],
+  },
+  {
     id: 'glitch',
     prompt: [
       '请逐个原样复述下面的字符串，每行一个，不要解释、不要纠正、不要翻译：',
       'SolidGoldMagikarp',
       'dodekatheon',
       'petertodd',
+      'Dragonbound',
+      '裏覚醒',
       PROBE_GLITCH_SENTINEL,
     ].join('\n'),
-    sentinels: ['SolidGoldMagikarp', 'dodekatheon', 'petertodd', PROBE_GLITCH_SENTINEL],
+    sentinels: ['SolidGoldMagikarp', 'dodekatheon', 'petertodd', 'Dragonbound', '裏覚醒', PROBE_GLITCH_SENTINEL],
+  },
+  {
+    id: 'template',
+    prompt: [
+      '请逐个判断下面的字符串你是否在训练数据或对话模板里见过。每个只回答：认识 / 不认识；认识的用一句话说明它标记什么：',
+      '<|im_start|>',
+      '<|observation|>',
+      '[INST]',
+      '<|eot_id|>',
+      '<｜Assistant｜>',
+      '<start_of_turn>',
+      '<minimax:tool_call>',
+      '<|im_middle|>',
+      'MTEST-FAKE-VFEN-7741',
+    ].join('\n'),
+    sentinels: ['MTEST-FAKE-VFEN-7741'],
   },
   {
     id: 'echo',

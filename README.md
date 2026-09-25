@@ -135,26 +135,36 @@ TTFT 仍只作 +1 弱加分，原始数字与画像始终显示——判断留�
 
 ## <a id="attribution"></a>归属分析（attribution）
 
-**一句话**：扫描全部已加载推理文本（探针哨兵顺带扫可见回复），把命中的结构指纹按权重累到厂商候选上；候选达到「匹配」需要至少一条 **tier-1** 证据且明显领先第二名，仅 tier-2/3 证据封顶「疑似」，只有无厂商证据时显示「未匹配」并列出泄漏物。这是**结构指纹匹配**，不是身份断言。
+**一句话**：扫描全部已加载推理文本（探针哨兵顺带扫可见回复），把命中的结构指纹按权重累到厂商候选上；候选达到「匹配」需要至少一条 **tier-1** 证据且明显领先第二名，仅 tier-2/3 证据封顶「疑似」，只有无厂商证据时显示「未匹配」并列出泄漏物。这是**结构指纹匹配**，不是身份断言。厂商槽位：DeepSeek 系 / Anthropic 系 / OpenAI 系 / Google / Qwen / GLM / Kimi / MiniMax / Llama / Mistral。
 
 证据表（[`src/client/attribution-signals.ts`](src/client/attribution-signals.ts)，`ATTRIBUTION_VERSION = 1`；引擎 [`attribution.ts`](src/client/attribution.ts)）分层：
 
 | 层 | 证据 | 厂商 | 权重 |
 |---|---|---|---:|
 | 1 · 基础设施泄漏 | `antml` 命名空间（工具调用 XML 漏进推理） | Anthropic 系 | 6 |
+| 1 · 模板泄漏 | 各家对话模板特殊 token：`<minimax:tool_call>`（MiniMax-M2 官方模板）、Kimi `<|im_middle|>`/`<|im_user|>`、GLM `<|observation|>`、DeepSeek 全角 `<｜Assistant｜>`、Llama-3 `<|eot_id|>`/`<|start_header_id|>`、Llama-2 `<<SYS>>`、`[INST]`（Mistral+Llama-2 共有）、ChatML `<|im_start|>`（Qwen 系）、Gemma `<start_of_turn>` | 对应厂商 | 5–6 |
 | 1 | `fp_v4pro_…` 部署串（社区观测于灰测会话） | DeepSeek 系 | 5 |
 | 1 | 其他 `fp_…` 串（OpenAI 风格 API 指纹） | OpenAI 系 | 4 |
-| 2 · 轨迹词汇 | 0813 Minimal（`we need`/`let's` 且零 `let me`）与 Standard（`let me` 沉重）指纹 | DeepSeek 系 | 3 |
+| 2 · 轨迹词汇 | 0813 Minimal（`we need`/`let's` 且零 `let me`）与 Standard（`let me` 沉重）指纹 | DeepSeek 系 | 1（支持性） |
 | 2 · 已证实脏 token | `EDMFunc`、`everydaycalculation`、`Nameeee`（厂商未定） | 未归属 | — |
 | 2 · 异常探测器 | 未收录 XML 标签、长十六进制串、`EDMFunc` 样后端标识、退化重复 | 未归属 | — |
-| 3 · 风格轶事/探针 | `delve` 词癖、破折号密度（≥3/千字）、glitch 金丝雀、探针哨兵回声 | 弱支持 | 1 |
+| 3 · 风格轶事/探针 | `delve` 词癖、破折号密度（≥3/千字）、glitch 金丝雀（r50k：`SolidGoldMagikarp` 系；cl100k：`petertodd` 系，清单取自 [SolidGoldMagikarp 研究](https://www.lesswrong.com/posts/aPeJE8bSo6rAFoLqg/solidgoldmagikarp-plus-prompt-generation)、[arXiv:2404.09894](https://arxiv.org/abs/2404.09894) 与 [garak 扫描器公开表](https://github.com/NVIDIA/garak/blob/main/garak/probes/glitch.py)）、探针哨兵回声 | 弱支持 | 1 |
 
 - **异常探测器**抓的是表里还没有的泄漏物：命中进「未归属」账本，附 ±40 字上下文样本，可直接抄给社区、一行入表。
 - **证据账本**按信号去重、封顶 40 条，每条带首现轮次与样本；逐轮行显示当轮最像的厂商与新增证据数。
-- **探针包**（面板底部，一键复制）：glitch token 电池（`SolidGoldMagikarp` 等金丝雀）、不可见字符回声电池、字母计数、知识截止探针。插件无法替你发消息（宿主契约只读）——复制后手动发到目标会话，模型回复由引擎被动扫描；哨兵回声记入账本，**复述是否退化请人工判断**（面板注有判断要点）。
+- **探针包**（面板底部，一键复制）：自然任务（主力语料）、glitch token 电池（r50k + cl100k 金丝雀，清单取自公开研究）、模板识别（对各家特殊 token 逐一问认识/不认识，末行假 token 做对照——引擎不解析此探针的回答，只供人工判读）、不可见字符回声电池、字母计数、知识截止探针。插件无法替你发消息（宿主契约只读）——复制后手动发到目标会话，模型回复由引擎被动扫描；哨兵回声记入账本，**复述是否退化请人工判断**（面板注有判断要点）。
 - **证据包导出**：归属区一键复制 JSON（候选、证据、灰测特征、会话 id），纯本地、零网络。
 
 **诚实边界**：结构指纹 ≠ 模型身份。`antml` 这类工件可能来自**脚手架**而非底座模型（Claude 系脚手架包裹任意底座都会漏 antml）；轨迹词汇是 DeepSeek 后训练/脚手架层面的指纹；风格标记是社区轶事级证据，checkpoint 漂移会改变风格。归属排名回答「像谁」，不回答「是谁」。
+
+### 2026-09-25 实测：opencode-zen `space-bunny-free`
+
+首个真实验证对象：OpenCode Zen 的官方隐身模型（限时免费、零保留提供商），社区猜测为 MiniMax 新模型（未经证实）。用归属引擎自己的探针包，经 opencode-zen API 直采三轮输出（自然任务 / glitch 电池 / 字母计数），喂给与面板完全相同的代码路径：
+
+- **轨迹指纹全中**：reasoning 全程 `We need … Need …` 电报体（efficient 18 / `let me` 0 / 裸 `we` 16），`traj-minimal` 点火；灰测正确 miss（无 `I'm doing`）。
+- **无任何 tier-1 泄漏**：无 antml、无 `fp_`、异常探测器零命中——输出非常干净。
+- **glitch 电池无退化**：`SolidGoldMagikarp` 等金丝雀逐字复述（引擎把 prompt 回声记为 tier-3 弱证据）；字母计数答出正确的 22。
+- **引擎结论**：仅 deepseek「疑似」（轨迹行）——而该模型社区猜测是 MiniMax。这次假阳性直接证明：**轨迹词汇是行业级后训练风格，不能单独驱动判定**。`ATTRIBUTION_VERSION = 2` 据此把轨迹行降为纯支持性证据（权重 3→1），并把 MiniMax 加入厂商槽位，等社区采到 MiniMax 侧的真实工件（泄漏串 / 工具命名）再入表。
 
 ## 安装
 
