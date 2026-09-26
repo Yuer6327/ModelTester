@@ -14,6 +14,22 @@ import type {
 } from '@deepseek-ai/dsh-client-ui-slots'
 import type { StatsSnapshot } from './session-store.ts'
 
+/** One finished probe turn of a batch run. */
+export interface BatchTurnResult {
+  readonly probeId: string
+  readonly status: 'answered' | 'timeout' | 'failed'
+  /** Reasoning + visible text captured for this turn ('' when nothing arrived). */
+  readonly text: string
+}
+
+/** Progress event for one probe of a batch run. */
+export interface BatchProgress {
+  readonly index: number
+  readonly total: number
+  readonly probeId: string
+  readonly status: 'sending' | 'waiting' | 'answered' | 'timeout' | 'failed'
+}
+
 /** Probe-send actions backed by the host sessions face (feature-detected). */
 export interface ModelTesterActions {
   /**
@@ -22,6 +38,16 @@ export interface ModelTesterActions {
    * does not expose create/open/prompt.
    */
   sendProbe(text: string): Promise<{ ok: boolean; error?: string }>
+  /**
+   * Batch runner: create ONE fresh session, then send each probe in order,
+   * waiting for its reply before the next (progress reported per probe).
+   * Optional — present only when the host face exposes create/open/prompt and
+   * a pollable conversation snapshot.
+   */
+  runBatch?(
+    items: readonly { id: string; text: string }[],
+    onProgress?: (progress: BatchProgress) => void,
+  ): Promise<{ ok: boolean; error?: string; turns?: readonly BatchTurnResult[] }>
 }
 
 /** Business face injected into the ModelTester panel component. */

@@ -655,6 +655,74 @@
   color: var(--dsw-alias-state-error-primary);
 }
 
+/* --- batch probe runner ------------------------------------------------- */
+
+.batchBar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 6px;
+}
+
+.batchSelectAll {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.batchCheck {
+  flex: none;
+  accent-color: var(--dsw-alias-brand-primary, currentColor);
+}
+
+.batchTokens {
+  flex: none;
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.batchConf {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 9px;
+  line-height: 14px;
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));
+  border: 1px solid var(--dsw-alias-border-l2);
+}
+
+.batchConf[data-conf='3'] {
+  color: var(--dsw-alias-brand-primary, var(--dsw-alias-label-primary));
+  border-color: currentColor;
+}
+
+.batchStatus {
+  flex: none;
+  font-size: 10px;
+  line-height: 14px;
+  color: var(--dsw-alias-label-tertiary, var(--dsw-alias-label-secondary));
+  font-variant-numeric: tabular-nums;
+}
+
+.batchStatus[data-status='answered'] {
+  color: var(--dsw-alias-state-success-primary);
+}
+
+.batchStatus[data-status='timeout'],
+.batchStatus[data-status='failed'] {
+  color: var(--dsw-alias-state-warn-label);
+}
+
+.batchGuess {
+  margin-top: 6px;
+}
+
 /* Reduced motion: no pulse, no width tween, instant morph. */
 @media (prefers-reduced-motion: reduce) {
   .liveDot,

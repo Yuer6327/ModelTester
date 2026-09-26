@@ -1,7 +1,7 @@
 {
   "name": "dsh-modeltester",
   "version": "0.0.5-alpha.2",
-  "description": "ModelTester — model detection & attribution panel for the DeepSeek Harness web chat. Ranks vendor families (DeepSeek / Anthropic / OpenAI / Google / Qwen / GLM / Kimi / MiniMax / Llama / Mistral / Ling) from structural fingerprints — template & tokenizer leaks, dirty tokens, trajectory vocabulary, probe canaries — with a full evidence ledger, gray-test signal detection, and a usage-delta fertility drill for quantitative tokenizer identification.",
+  "description": "ModelTester — model detection & attribution panel for the DeepSeek Harness web chat. Ranks vendor families (DeepSeek / Anthropic / OpenAI / Google / Qwen / GLM / Kimi / MiniMax / MiMo / LongCat / InternLM / Step / Yi / Llama / Mistral / Nemotron / Grok / Ling) from structural fingerprints — template & tokenizer leaks, dirty tokens, trajectory vocabulary, probe canaries — with a full evidence ledger, gray-test signal detection, and a usage-delta fertility drill for quantitative tokenizer identification.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -24,7 +24,7 @@
     "build": "tsdown",
     "prepare": "pnpm build",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types verify.mjs && node --experimental-strip-types verify-dsh-std.mjs",
+    "test": "node --experimental-strip-types verify.mjs && node --experimental-strip-types verify-dsh-std.mjs && node --experimental-strip-types verify-batch.mjs && node verify-fingerprint-drill.mjs",
     "compat": "node verify-dsh-host.mjs",
     "dsh-releases": "node verify-dsh-releases.mjs"
   },

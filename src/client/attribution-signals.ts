@@ -32,22 +32,29 @@ const DIRTY_PATTERNS: readonly { id: string; pattern: RegExp }[] = [
 ]
 
 /** Version of the attribution table and scoring rules. */
-export const ATTRIBUTION_VERSION = 5 as const
+export const ATTRIBUTION_VERSION = 7 as const
 
 /** Vendor families the evidence table can support. */
-export type Vendor = 'deepseek' | 'anthropic' | 'openai' | 'google' | 'qwen' | 'zhipu' | 'moonshot' | 'minimax' | 'meta' | 'mistral' | 'ling'
+export type Vendor =
+  | 'deepseek' | 'anthropic' | 'openai' | 'google' | 'qwen' | 'zhipu' | 'moonshot' | 'minimax'
+  | 'xiaomi' | 'meituan' | 'internlm' | 'step' | 'yi' | 'meta' | 'mistral' | 'nvidia' | 'xai' | 'ling'
 
 /** Stable union of every signal id (scanned + derived) — also the locale key suffix. */
 export type SignalId =
   | 'antml-ns' | 'fp-v4pro' | 'fp-generic' | 'edm-func' | 'everyday-calc' | 'nameeee'
   | 'style-delve' | 'anom-ns-tag' | 'anom-hex' | 'anom-ident' | 'anom-repeat'
   | 'probe-glitch-r50k' | 'probe-glitch-cl100k' | 'probe-echo' | 'probe-cutoff' | 'probe-count'
+  | 'probe-toolfmt' | 'probe-refusal' | 'probe-ctxwin' | 'probe-identity' | 'probe-sysprompt'
   | 'tmpl-minimax' | 'tmpl-kimi' | 'tmpl-glm' | 'tmpl-glm-roles' | 'tmpl-deepseek' | 'tmpl-llama' | 'tmpl-mistral-tools'
-  | 'tmpl-inst' | 'tmpl-chatml' | 'tmpl-gemma' | 'tmpl-ling'
+  | 'tmpl-inst' | 'tmpl-chatml' | 'tmpl-qwen' | 'tmpl-gemma' | 'tmpl-ling'
+  | 'tmpl-xiaomi' | 'tmpl-meituan' | 'tmpl-internlm' | 'tmpl-step' | 'tmpl-yi'
   | 'traj-minimal' | 'traj-standard' | 'style-emdash'
 
 /** Display order (also the tiebreak for equal scores). */
-export const VENDORS: readonly Vendor[] = ['deepseek', 'anthropic', 'openai', 'google', 'qwen', 'zhipu', 'moonshot', 'minimax', 'meta', 'mistral', 'ling']
+export const VENDORS: readonly Vendor[] = [
+  'deepseek', 'anthropic', 'openai', 'google', 'qwen', 'zhipu', 'moonshot', 'minimax',
+  'xiaomi', 'meituan', 'internlm', 'step', 'yi', 'meta', 'mistral', 'nvidia', 'xai', 'ling',
+]
 
 /** Evidence strength class. */
 export type EvidenceTier = 1 | 2 | 3
@@ -82,6 +89,16 @@ export const PROBE_CUTOFF_SENTINEL = 'MT-CUTOFF-2468ace'
 export const PROBE_COUNT_SENTINEL = 'MT-CNT-ttstrawberryberry-2468'
 /** Sentinel line of the glitch-token battery. */
 export const PROBE_GLITCH_SENTINEL = 'MT-GLITCH-BATTERY-0813'
+/** Sentinel for the tool-call format elicitation probe. */
+export const PROBE_TOOLFMT_SENTINEL = 'MT-TOOLFMT-4e8a21'
+/** Sentinel for the refusal-shape battery. */
+export const PROBE_REFUSAL_SENTINEL = 'MT-REFUSAL-71c93b'
+/** Sentinel for the context-window self-report probe. */
+export const PROBE_CONTEXT_SENTINEL = 'MT-CTXWIN-a1f86d'
+/** Sentinel for the identity grid probe. */
+export const PROBE_IDENTITY_SENTINEL = 'MT-IDENT-58b2c4'
+/** Sentinel for the system-prompt extraction probe. */
+export const PROBE_SYS_PROMPT_SENTINEL = 'MT-SYSPRM-3c9e77'
 
 /** Clone a pattern with the global flag for match counting. */
 function globalize(pattern: RegExp): RegExp {
@@ -221,7 +238,7 @@ const templateSignals: readonly AttributionSignal[] = [
     tier: 1,
     match: [/<mm:think>/g, /<\/mm:think>/g, /\]<\](?:image|video|speech|frame|minimax|vision pad|start of image|start of video|start of speech|start of frame|end of image|end of video|end of speech|end of frame)\[>\[/g, /<\|content_altered_placeholder\|>/g, /\]!p~\[/g, /\[e~\[/g, /\]~b\]/g, /\]!d~\[/g, /\]~!b\[/g],
     vendors: { minimax: 6 },
-    rationale: 'MiniMax-M3 template tokens from the official tokenizer_config.json: the <mm:think> vendor namespace, the bizarre ]<]…[>[ / ]!p~[ bracket-fusion tokens, and <|content_altered_placeholder|>. (M2.1 also carried <minimax:tool_call>, dropped in M3.)',
+    rationale: 'MiniMax-M3 template tokens from the official tokenizer_config.json (re-captured 2026-09-26): the <mm:think> vendor namespace, the bizarre ]<]…[>[ / ]!p~[ bracket-fusion tokens, and <|content_altered_placeholder|>. (M2.7 carries <minimax:tool_call> again; M3 dropped it.)',
   },
   {
     id: 'tmpl-kimi',
@@ -229,15 +246,15 @@ const templateSignals: readonly AttributionSignal[] = [
     tier: 1,
     match: [/<\|end_of_msg\|>/g, /<\|open\|>/g, /<\|close\|>/g, /<\|sep\|>/g, /\[start_header_id\]/g, /\[end_header_id\]/g, /<osagent_mode>/g, /<\|media_begin\|>/g, /<\|media_content\|>/g, /<\|media_end\|>/g, /<\|media_pad\|>/g],
     vendors: { moonshot: 6 },
-    rationale: 'Kimi-K3 template tokens from the official tokenizer_config.json — K3 replaced the entire K2 im_* family with end_of_msg / open / close / sep / bracket start_header_id / osagent_mode.',
+    rationale: 'Kimi-K3 template tokens from the official tokenizer_config.json (re-captured 2026-09-26) — K3 replaced the entire K2 im_* family with end_of_msg / open / close / sep / bracket start_header_id / osagent_mode. K3\'s tokenizer itself is tiktoken-format (no tokenizer.json).',
   },
   {
     id: 'tmpl-glm',
     kind: 'template',
     tier: 1,
-    match: [/<\|observation\|>/g, /<arg_key>/g, /<\/arg_key>/g, /<arg_value>/g, /\/nothink/g, /<\|begin_of_box\|>/g],
+    match: [/<sop>/g, /<\|observation\|>/g, /<arg_key>/g, /<\/arg_key>/g, /<\|reminder\|>/g],
     vendors: { zhipu: 6 },
-    rationale: 'GLM-4.x tool/toolbox tokens (<|observation|>, <arg_key>, /nothink switch) from the official GLM-4.6 tokenizer_config.',
+    rationale: 'GLM-5.3 template tokens from the official chat_template.jinja (captured 2026-09-26): <sop> (start-of-prompt) is new with GLM-5; <|observation|> and <arg_key> carry over from the GLM-4.x toolbox style; <|reminder|> is 5.x-new.',
   },
   {
     id: 'tmpl-glm-roles',
@@ -245,15 +262,71 @@ const templateSignals: readonly AttributionSignal[] = [
     tier: 2,
     match: [/<\|system\|>/g, /<\|user\|>/g, /<\|assistant\|>/g],
     vendors: { zhipu: 2 },
-    rationale: 'GLM role triple — present in the GLM-4.6 tokenizer but shared with the older Vicuna-style template heritage, so support-only.',
+    rationale: 'GLM role triple — present in GLM-5.3 but shared with the older Vicuna-style template heritage, so support-only.',
   },
   {
     id: 'tmpl-deepseek',
     kind: 'template',
+    tier: 2,
+    match: [/<｜begin▁of▁sentence｜>/g, /<｜end▁of▁sentence｜>/g, /<｜Assistant｜>/g, /<｜User｜>/g, /<｜tool▁calls▁begin｜>/g],
+    vendors: { deepseek: 3, step: 3 },
+    rationale: 'Full-width ｜ (U+FF5C) + ▁ (U+2581) template frame — unmistakable lineage, but NOT DeepSeek-exclusive anymore: StepFun\'s Step-3.5 tokenizer clones the whole frame (captured 2026-09-26). Shared support for both; the vocab-size pair (129280 vs 128896) and Step-unique tokens separate them.',
+  },
+  {
+    id: 'tmpl-step',
+    kind: 'template',
     tier: 1,
-    match: [/<｜begin▁of▁sentence｜>/g, /<｜end▁of▁sentence｜>/g, /<｜Assistant｜>/g, /<｜User｜>/g],
-    vendors: { deepseek: 6 },
-    rationale: 'DeepSeek template tokens with full-width ｜ (U+FF5C) and ▁ (U+2581) — unmistakable DeepSeek tokenizer artifacts (DeepSeek-V3.2 tokenizer_config).',
+    match: [/<\|EOT\|>/g, /<｜▁pad▁｜>/g, /<｜fim▁begin｜>/g, /<｜place▁holder▁no▁\d+｜>/g],
+    vendors: { step: 6 },
+    rationale: 'Step-3.5-Flash-unique tokens (captured 2026-09-26): ASCII <|EOT|> plus the full-width pad / fim / numbered place-holder tokens DeepSeek does not have — separates Step from the DeepSeek-style full-width frame it otherwise clones.',
+  },
+  {
+    id: 'tmpl-chatml',
+    kind: 'template',
+    tier: 2,
+    match: [/<\|im_start\|>/g, /<\|im_end\|>/g],
+    vendors: { qwen: 2, yi: 2 },
+    rationale: 'ChatML <|im_start|>/<|im_end|> frame — shared by Qwen and Yi (and their derivatives), so support-only for both.',
+  },
+  {
+    id: 'tmpl-qwen',
+    kind: 'template',
+    tier: 1,
+    match: [/<tts_text_bos>/g, /<tts_text_eod>/g, /<tts_text_bos_single>/g, /<\|object_ref_start\|>/g, /<\|quad_start\|>/g, /<\|vision_start\|>/g, /<\|box_start\|>/g],
+    vendors: { qwen: 6 },
+    rationale: 'Qwen-unique tokens: the Qwen3.8 TTS control tokens (<tts_text_*>, captured 2026-09-26, vocab grew to 248320) plus the Qwen3-era object_ref/quad/vision/box controls for older checkpoints. Note <|audio_pad|> is shared with MiMo and scores nowhere.',
+  },
+  {
+    id: 'tmpl-yi',
+    kind: 'template',
+    tier: 1,
+    match: [/<\|im_sep\|>/g, /<\|startoftext\|>/g],
+    vendors: { yi: 5 },
+    rationale: 'Yi-34B-Chat tokens (official tokenizer_config): <|im_sep|> is Yi-unique in the ChatML family; <|startoftext|> also appeared in Ling-1T-era configs, so weight 5 not 6.',
+  },
+  {
+    id: 'tmpl-xiaomi',
+    kind: 'template',
+    tier: 1,
+    match: [/<\|mimo_video_start\|>/g, /<\|mimo_video_end\|>/g, /<\|mimo_audio_start\|>/g, /<\|mimo_audio_eod\|>/g, /<\|mimo_audio_end\|>/g],
+    vendors: { xiaomi: 6 },
+    rationale: 'MiMo-V2.6 vendor namespace (<|mimo_video_*|> / <|mimo_audio_*|>, captured 2026-09-26) — a Qwen-derived tokenizer with an unmistakable mimo_* special-token block.',
+  },
+  {
+    id: 'tmpl-meituan',
+    kind: 'template',
+    tier: 1,
+    match: [/<longcat_think>/g, /<\/longcat_think>/g, /<longcat_tool_call>/g, /<longcat_arg_key>/g, /<longcat_observation>/g, /<longcat_files>/g],
+    vendors: { meituan: 6 },
+    rationale: 'LongCat vendor namespace (<longcat_*> from the official LongCat-Flash-Lite-Sparse chat template, captured 2026-09-26) — a complete in-template XML dialect no other family uses.',
+  },
+  {
+    id: 'tmpl-internlm',
+    kind: 'template',
+    tier: 1,
+    match: [/<SMILES>/g, /<\/SMILES>/g, /<protein>/g, /<dna>/g, /<rna>/g, /<\|ts\|>/g, /<\|plugin\|>/g, /<\|interpreter\|>/g],
+    vendors: { internlm: 6 },
+    rationale: 'Intern-S1-Pro scientific-domain tokens (SMILES / protein / dna / rna / timeseries / plugin, captured 2026-09-26) — chemistry- and biology-flavored specials no other family carries.',
   },
   {
     id: 'tmpl-llama',
@@ -261,7 +334,7 @@ const templateSignals: readonly AttributionSignal[] = [
     tier: 1,
     match: [/<\|begin_of_text\|>/g, /<\|header_start\|>/g, /<\|header_end\|>/g, /<\|eot\|>/g, /<\|eom\|>/g, /<\|python_start\|>/g],
     vendors: { meta: 6 },
-    rationale: 'Llama-4 template tokens (begin_of_text / header_start / eot / eom / python_start) from the official tokenizer_config; Llama-3 eot_id/start_header_id and Llama-2 <<SYS>> dropped with the old generations.',
+    rationale: 'Llama-4 template tokens (begin_of_text / header_start / eot / eom / python_start) from the official tokenizer_config; Llama-4\'s vocab grew to 202048 (near the o200k/minimax cluster), so vocabulary alone no longer separates it — these tokens do.',
   },
   {
     id: 'tmpl-inst',
@@ -269,7 +342,7 @@ const templateSignals: readonly AttributionSignal[] = [
     tier: 1,
     match: [/\[INST\]/g, /\[\/INST\]/g],
     vendors: { mistral: 5 },
-    rationale: '[INST] frame — current in the Mistral-Small-3.2 tokenizer_config (Llama-2 heritage, dropped from the meta row with the old generations).',
+    rationale: '[INST] frame — current in the Mistral-Small-3.x tokenizer (vocab 131072, re-captured 2026-09-26; Llama-2 heritage, dropped from the meta row with the old generations).',
   },
   {
     id: 'tmpl-mistral-tools',
@@ -277,15 +350,7 @@ const templateSignals: readonly AttributionSignal[] = [
     tier: 1,
     match: [/\[TOOL_CALLS\]/g, /\[AVAILABLE_TOOLS\]/g, /\[\/AVAILABLE_TOOLS\]/g, /\[SYSTEM_PROMPT\]/g, /\[ARGS\]/g, /\[CALL_ID\]/g],
     vendors: { mistral: 6 },
-    rationale: 'Mistral tool-call frame tokens ([TOOL_CALLS] / [AVAILABLE_TOOLS] / [ARGS]…) from the official Mistral-Small-3.2 tokenizer_config — bracket-style, unique to Mistral.',
-  },
-  {
-    id: 'tmpl-chatml',
-    kind: 'template',
-    tier: 1,
-    match: [/<\|im_start\|>/g, /<\|object_ref_start\|>/g, /<\|quad_start\|>/g, /<\|vision_start\|>/g, /<\|box_start\|>/g],
-    vendors: { qwen: 5 },
-    rationale: 'ChatML <|im_start|> frame plus Qwen3-unique control tokens (object_ref / quad / vision / box) from the official Qwen3 tokenizer_config.',
+    rationale: 'Mistral tool-call frame tokens ([TOOL_CALLS] / [AVAILABLE_TOOLS] / [ARGS]…) from the official Mistral-Small-3.x tokenizer_config — bracket-style, unique to Mistral.',
   },
   {
     id: 'tmpl-gemma',
@@ -299,9 +364,9 @@ const templateSignals: readonly AttributionSignal[] = [
     id: 'tmpl-ling',
     kind: 'template',
     tier: 1,
-    match: [/<\|role_end\|>/g, /<\|startoftext\|>/g],
+    match: [/<\|role_end\|>/g, /<role>/g, /<function-name>/g, /<args-json-object>/g],
     vendors: { ling: 5 },
-    rationale: 'InclusionAI Ling tokens (<|role_end|> / <|startoftext|>) from the official Ling-1T tokenizer_config.',
+    rationale: 'Ling-mini-2.0 tokens (chat template captured 2026-09-26): <|role_end|> carries over from Ling-1T; the <role> / <function-name> / <args-json-object> tool dialect is 2.0-era. Weight 5 — <|role_end|> is short and generic-looking.',
   },
 ]
 
@@ -358,6 +423,46 @@ const probeSignals: readonly AttributionSignal[] = [
     match: [new RegExp(PROBE_COUNT_SENTINEL, 'g')],
     vendors: {},
     rationale: 'Letter-count probe answered; judge the tokenizer-dependent errors manually.',
+  },
+  {
+    id: 'probe-toolfmt',
+    kind: 'probe',
+    tier: 3,
+    match: [new RegExp(PROBE_TOOLFMT_SENTINEL, 'g')],
+    vendors: {},
+    rationale: 'Tool-format elicitation answered; the demonstrated call format is the model\'s native template talking — check the reply for family-specific tool-call syntax (batch scanner scores it per family).',
+  },
+  {
+    id: 'probe-refusal',
+    kind: 'probe',
+    tier: 3,
+    match: [new RegExp(PROBE_REFUSAL_SENTINEL, 'g')],
+    vendors: {},
+    rationale: 'Refusal-shape battery answered; the boundary placement and refusal phrasing are post-training signatures — judge the shape manually.',
+  },
+  {
+    id: 'probe-ctxwin',
+    kind: 'probe',
+    tier: 3,
+    match: [new RegExp(PROBE_CONTEXT_SENTINEL, 'g')],
+    vendors: {},
+    rationale: 'Context-window self-report answered; claimed window sizes (128k/256k/1M) map loosely to families — self-reports of stealth models are frequently bait.',
+  },
+  {
+    id: 'probe-identity',
+    kind: 'probe',
+    tier: 3,
+    match: [new RegExp(PROBE_IDENTITY_SENTINEL, 'g')],
+    vendors: {},
+    rationale: 'Identity grid answered; stealth models\' self-descriptions are frequently bait — record the claim, weigh it against structural evidence, and treat contradictions as anomalies.',
+  },
+  {
+    id: 'probe-sysprompt',
+    kind: 'probe',
+    tier: 3,
+    match: [new RegExp(PROBE_SYS_PROMPT_SENTINEL, 'g')],
+    vendors: {},
+    rationale: 'System-prompt extraction answered; gateway scaffold vocabulary identifies the reseller stack, not the model family.',
   },
 ]
 

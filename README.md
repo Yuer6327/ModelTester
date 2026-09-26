@@ -7,7 +7,7 @@
 
 ModelTester 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh）网页端插件：在会话页右上角挂载一块**模型检测面板**，回答一个问题——
 
-1. **当前会话像哪家模型？**（归属分析：11 家厂商候选 + 完整证据账本）
+1. **当前会话像哪家模型？**（归属分析：18 家厂商候选 + 完整证据账本）
 
 一切判定都是本地、无模型、零网络的**结构指纹匹配**，且每一条结论都附带可展开的证据与上下文样本。面板回答「像谁」，不回答「是谁」。
 
@@ -17,12 +17,12 @@ ModelTester 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harne
 
 | 层 | 回答的问题 | 实现 |
 |---|---|---|
-| **归属分析**（主视图） | 这个会话**像哪家**？ | 11 家厂商候选评分排名 + 证据账本（[`src/client/attribution.ts`](src/client/attribution.ts)） |
+| **归属分析**（主视图） | 这个会话**像哪家**？ | 18 家厂商候选评分排名 + 证据账本（[`src/client/attribution.ts`](src/client/attribution.ts)） |
 | **模板 / 分词器指纹** | 服务栈的模板与词表是哪家的？ | 各家官方 tokenizer_config 特殊 token 的 tier-1 泄漏行（[`src/client/tokenizers.ts`](src/client/tokenizers.ts)） |
 | **脏 token 与泄漏物** | 底层漏出了什么工件？ | 社区证实清单 + 通用异常探测器：未收录泄漏自动入账本，供一行入表 |
 | **0813 轨迹指纹** | 后训练风格像哪条轨迹？ | `We need` / `Let me` / `The user wants` 词法（支持性证据，[`src/client/keywords.ts`](src/client/keywords.ts)） |
-| **探针包** | 怎么主动取证？ | 6 个探针（自然任务 / glitch 电池 / 模板识别 / 回声 / 字母计数 / 知识截止），**点击直接新开会话并发送**（旧宿主回退为复制），含假 token 对照 |
-| **fertility 指纹**（仓库工具） | 分词器**定量**是哪家？ | usage 差分 + 官方 tokenizer 本地比对（`fingerprint-drill.mjs`） |
+| **探针包 + 批量测试** | 怎么主动取证？ | 11 个探针（工具格式诱发 / 模板识别 / glitch 电池 / 回声 / 字母计数 / 知识截止 / 拒答形状 / 上下文自述 / 自然任务 / 身份格网 / 系统提示词提取），按置信度排序；**复选框多选 + 预计 token 数 + 一键批量测试**（新开会话逐条发送等回复），跑完给出**猜测 + 置信度**（[`src/client/batch.ts`](src/client/batch.ts)）；旧宿主回退为逐条发送/复制 |
+| **fertility 指纹**（仓库工具） | 分词器**定量**是哪家？ | usage 差分 + 官方 tokenizer 本地比对；drill 另含词表规模指纹、特殊 token 注入、目录泄露、错误包络、上下文天花板、同网关 A/B 与跨层综合判定（`fingerprint-drill.mjs --batch`） |
 
 面板实时增量折叠流式输出、自动回填完整历史（≤30 页）、按会话本地持久化；不发送任何数据，不改动、不补丁宿主任何既有 UI。
 
@@ -58,10 +58,11 @@ OpenCode Zen 的官方隐身模型（限时免费、零保留提供商），社�
 被动面板拿不到 usage 字段，仓库根另附一套直连 API 的定量工具：
 
 1. [`fingerprint-texts.json`](fingerprint-texts.json) —— 固定探针文本组 T0–T5（英文/中文/代码/多语言 emoji/数字 URL，最大化分词器分歧）；
-2. [`fingerprint-drill.mjs`](fingerprint-drill.mjs) —— 逐条发送并记录 `usage.prompt_tokens`；网关模板开销恒定，**相邻差分剔除模板、隔离分词器本身**。快照按时间落盘 `.attr-corpus/fingerprints/`，跨期对比即模型替换审计。运行：`OPENCODE_ZEN_API_KEY=… node fingerprint-drill.mjs <model>`；
-3. [`fingerprint-reference.py`](fingerprint-reference.py) —— 用各家官方 `tokenizer.json`（python [tokenizers](https://pypi.org/project/tokenizers/) 库，参考文件在 `.attr-corpus/tokenizers-json/`）本地算同一组文本的差分向量并排名比对。
+2. [`fingerprint-drill.mjs`](fingerprint-drill.mjs) —— 七个探针小节，按 flag 选择：`--usage` 逐条发送并记录 `usage.prompt_tokens`，网关模板开销恒定，**相邻差分剔除模板、隔离分词器本身**（探针文本 T0–T9：英/中/代码/多语言 emoji/ZWJ 旗标/泰韩俄/缩进/密度）；`--logprobs` 词表规模指纹（echo 分词向量 + 欠训练 token 概率画像 + 观测 max token id 对照词表参照表，近邻永远输出候选**对**）；`--inject` 特殊 token 注入电池（家族停止符截断探测，假 token / 截断形态 / 400 拒绝 / 推理预算耗尽四类对照）；`--models` 目录泄露扫描；`--errors` 错误包络（服务栈指纹）；`--context` 上下文天花板阶梯；`--sibling <model>` 同网关目录 A/B（usage 差分 L1 比对）。`--batch`（或 `--all`）跑全套并给出**跨层综合猜测 + 置信度**（分层原则：tokenizer 层 vs 基础设施层独立计票）。快照落盘 `.attr-corpus/fingerprints/`，跨期对比即模型替换审计。运行：`OPENCODE_ZEN_API_KEY=… node fingerprint-drill.mjs <model> [baseURL] [--batch] [--sibling <model>]…`；
+3. [`fingerprint-reference.py`](fingerprint-reference.py) —— 用各家官方 `tokenizer.json`（python [tokenizers](https://pypi.org/project/tokenizers/) 库，参考文件在 `.attr-corpus/tokenizers-json/`）本地算同一组文本的差分向量并排名比对；
+4. [`verify-fingerprint-drill.mjs`](verify-fingerprint-drill.mjs) —— 离线回归：本地 mock OpenAI 兼容服务器验证全部小节的快照输出（含批量综合判定）；[`verify-batch.mjs`](verify-batch.mjs) 验证面板批量评分纯函数（无网络、无凭据，均已在 `pnpm test` 链内）。
 
-Anthropic 与 OpenAI 不公开 tokenizer——前者由 antml 工件行覆盖，后者由 `fp_…` 行与 glitch 电池覆盖。
+闭源/无公开 tokenizer 的厂商按层覆盖：Anthropic 由 antml 工件行、OpenAI 由 `fp_…` 行与 glitch 电池、xAI 与 NVIDIA（Nemotron 特殊 token 全是占位符）由目录泄露、词表规模簇与行为层覆盖。特征集与参照库均已刷新至各家族最新一代（2026-09-26 经代理自 HuggingFace 官方仓库重采，旧代文件移除）。
 
 ## 0813 轨迹指纹
 

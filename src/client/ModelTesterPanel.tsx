@@ -20,12 +20,13 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { formatCount, type TrajectoryStats } from './stats.ts'
-import { evidencePack, type AttributionEvidence } from './attribution.ts'
+import { evidencePack, type AttributionEvidence, type AttributionReport } from './attribution.ts'
 import { ALL_SIGNALS } from './attribution-signals.ts'
-import { PROBES } from './probes.ts'
+import { aggregateBatch, estimateTokens, familyHitsOf, orderedProbes, type BatchGuess } from './batch.ts'
+import { type ProbeEntry } from './probes.ts'
 import { GROUPS, PATTERNS, type Group, type Mode } from './keywords.ts'
 import type { HistoryState } from './session-store.ts'
-import type { ModelTesterActions, ModelTesterPanelProps } from './slots.ts'
+import type { BatchProgress, ModelTesterActions, ModelTesterPanelProps } from './slots.ts'
 import css from './ModelTesterPanel.module.css'
 
 /** Card width when expanded. */
@@ -321,7 +322,7 @@ function PanelCard({
               <HistoryNotice state={historyState} pages={historyPages} t={t} />
             )}
             <AttributionSection stats={stats} sessionId={sessionId} t={t} />
-            <ProbesSection t={t} actions={actions} />
+            <ProbesSection t={t} actions={actions} engine={stats.attribution} />
             {stats.anomaly !== 'none' ? (
               <ReasoningAlert stats={stats} t={t} />
             ) : (
@@ -539,32 +540,136 @@ function EvidenceRow({ entry, t }: { entry: AttributionEvidence; t: ModelTesterP
   )
 }
 
-/** Probe kit: one-click send into a fresh session (copy as fallback). */
-function ProbesSection({ t, actions }: { t: ModelTesterPanelProps['t']; actions?: ModelTesterActions }) {
+/**
+ * Probe kit + batch runner. When the host face supports `runBatch`, the
+ * section becomes a checklist: probes ordered by structural confidence, each
+ * with a token-cost estimate, select-all, and a one-click run that drives all
+ * selected probes through one fresh session and reports a ranked guess with a
+ * confidence label. Without the batch face, rows keep the per-probe
+ * send/copy fallback.
+ */
+function ProbesSection({ t, actions, engine }: {
+  t: ModelTesterPanelProps['t']
+  actions?: ModelTesterActions
+  engine: AttributionReport
+}) {
+  const probes = useMemo(() => orderedProbes(), [])
+  const canBatch = typeof actions?.runBatch === 'function'
+  const canSend = typeof actions?.sendProbe === 'function'
+  const [selected, setSelected] = useState<Set<string>>(() => new Set(probes.map(p => p.id)))
+  const [running, setRunning] = useState(false)
+  const [progress, setProgress] = useState<Record<string, BatchProgress['status']>>({})
+  const [guess, setGuess] = useState<BatchGuess | null>(null)
+  const [coverage, setCoverage] = useState({ answered: 0, total: 0 })
+  const [error, setError] = useState('')
+
+  const selectedProbes = probes.filter(probe => selected.has(probe.id))
+  const totalTokens = selectedProbes.reduce((sum, probe) => sum + estimateTokens(probe.prompt), 0)
+
+  const toggle = (id: string): void => {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  const toggleAll = (): void => {
+    setSelected(prev => (prev.size === probes.length ? new Set<string>() : new Set(probes.map(p => p.id))))
+  }
+
+  const run = async (): Promise<void> => {
+    if (running || !canBatch || actions?.runBatch === undefined || selectedProbes.length === 0) return
+    setRunning(true)
+    setGuess(null)
+    setError('')
+    setProgress({})
+    const items = selectedProbes.map(probe => ({ id: probe.id, text: probe.prompt }))
+    try {
+      const response = await actions.runBatch(items, progress0 => {
+        setProgress(prev => ({ ...prev, [progress0.probeId]: progress0.status }))
+      })
+      if (!response.ok || response.turns === undefined) {
+        setError(response.error ?? 'unavailable')
+        return
+      }
+      const text = response.turns.map(turn => turn.text).join('\n')
+      const answered = response.turns.filter(turn => turn.status === 'answered').length
+      setCoverage({ answered, total: items.length })
+      setGuess(aggregateBatch({ engine, hits: familyHitsOf(text), answered, total: items.length }))
+    } catch {
+      setError('unavailable')
+    } finally {
+      setRunning(false)
+    }
+  }
+
   return (
     <section className={css.section}>
       <div className={css.modeRow}>
         <h3 className={css.modeLabel}>{t('attr.probes')}</h3>
         <span className={css.attrBadge}>{t('attr.probesHint')}</span>
       </div>
+      {canBatch && (
+        <div className={css.batchBar}>
+          <label className={css.batchSelectAll}>
+            <input
+              type="checkbox"
+              checked={selected.size === probes.length}
+              ref={node => {
+                if (node !== null) node.indeterminate = selected.size > 0 && selected.size < probes.length
+              }}
+              onChange={toggleAll}
+            />
+            {t('attr.batch.selectAll')}
+          </label>
+          <span className={css.batchTokens}>≈{formatCount(totalTokens)} tok</span>
+          <button type="button" className={css.probeBtn} disabled={running || selectedProbes.length === 0} onClick={() => { void run() }}>
+            {running ? t('attr.batch.running') : t('attr.batch.run')}
+          </button>
+        </div>
+      )}
       <div className={css.patternList}>
-        {PROBES.map(probe => (
-          <ProbeRow key={probe.id} probe={probe} t={t} actions={actions} />
+        {probes.map(probe => (
+          <ProbeRow
+            key={probe.id}
+            probe={probe}
+            t={t}
+            actions={actions}
+            canBatch={canBatch}
+            selected={selected.has(probe.id)}
+            onToggle={toggle}
+            status={progress[probe.id]}
+          />
         ))}
       </div>
+      {error !== '' && <p className={css.empty}>{t('attr.batch.unavailable')}</p>}
+      {guess !== null && <BatchGuessCard guess={guess} coverage={coverage} t={t} />}
     </section>
   )
 }
 
-/** One probe row: send into a fresh session when the host face allows, else copy. */
-function ProbeRow({ probe, t, actions }: {
-  probe: (typeof PROBES)[number]
+/** One probe row of the batch checklist (or the send/copy fallback). */
+function ProbeRow({ probe, t, actions, canBatch, selected, onToggle, status }: {
+  probe: ProbeEntry
   t: ModelTesterPanelProps['t']
   actions?: ModelTesterActions
+  canBatch: boolean
+  selected: boolean
+  onToggle: (id: string) => void
+  status: BatchProgress['status'] | undefined
 }) {
-  const canSend = typeof actions?.sendProbe === 'function'
   const [feedback, setFeedback] = useState('')
 
+  const copy = async (): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(probe.prompt)
+      setFeedback(t('attr.copied'))
+      setTimeout(() => setFeedback(''), 1200)
+    } catch {
+      /* clipboard unavailable: non-fatal */
+    }
+  }
   const send = async (): Promise<void> => {
     if (actions?.sendProbe === undefined) return
     try {
@@ -576,20 +681,16 @@ function ProbeRow({ probe, t, actions }: {
     setTimeout(() => setFeedback(''), 1600)
   }
 
-  const copy = async (): Promise<void> => {
-    try {
-      await navigator.clipboard.writeText(probe.prompt)
-      setFeedback(t('attr.copied'))
-      setTimeout(() => setFeedback(''), 1200)
-    } catch {
-      /* clipboard unavailable: non-fatal */
-    }
-  }
-
   return (
     <span className={css.patternItem} title={t(`attr.probe.${probe.id}.note`)}>
+      {canBatch && (
+        <input type="checkbox" className={css.batchCheck} checked={selected} onChange={() => onToggle(probe.id)} />
+      )}
       <span className={css.patternKey}>{t(`attr.probe.${probe.id}`)}</span>
-      {canSend ? (
+      <span className={css.batchConf} data-conf={probe.confidence}>{t(`attr.conf.${probe.confidence}`)}</span>
+      <span className={css.batchTokens}>≈{estimateTokens(probe.prompt)}</span>
+      {status !== undefined && <span className={css.batchStatus} data-status={status}>{t(`attr.batch.status.${status}`)}</span>}
+      {!canBatch && (typeof actions?.sendProbe === 'function' ? (
         <button type="button" className={css.probeBtn} onClick={() => { void send() }}>
           {feedback !== '' ? feedback : t('attr.send')}
         </button>
@@ -597,8 +698,49 @@ function ProbeRow({ probe, t, actions }: {
         <button type="button" className={css.probeBtn} onClick={() => { void copy() }}>
           {feedback !== '' ? feedback : t('attr.copy')}
         </button>
+      ))}
+      {canBatch && (
+        <button type="button" className={css.probeBtn} onClick={() => { void copy() }} title={t('attr.copy')}>
+          {feedback !== '' ? feedback : t('attr.copy')}
+        </button>
       )}
     </span>
+  )
+}
+
+/** The batch aggregate: ranked guess + confidence + coverage + elicited tokens. */
+function BatchGuessCard({ guess, coverage, t }: {
+  guess: BatchGuess
+  coverage: { answered: number; total: number }
+  t: ModelTesterPanelProps['t']
+}) {
+  return (
+    <div className={css.batchGuess} data-confidence={guess.confidence}>
+      <div className={css.modeRow}>
+        <h3 className={css.modeLabel}>{t('attr.batch.guess')}</h3>
+        <span className={css.attrBadge}>{coverage.answered}/{coverage.total} {t('attr.batch.answeredCount')}</span>
+      </div>
+      {guess.vendor === null ? (
+        <p className={css.empty}>{t('attr.batch.noGuess')}</p>
+      ) : (
+        <div className={css.candidate} data-attr={guess.confidence === 'high' ? 'likely' : guess.confidence === 'none' ? 'none' : 'possible'}>
+          <div className={css.candidateHead}>
+            <span className={css.candidateName}>{t(`vendor.${guess.vendor}`)}</span>
+            <span className={css.candidateScore}>{t('attr.batch.confidence')} <b>{t(`attr.batch.conf.${guess.confidence}`)}</b></span>
+          </div>
+          {guess.hits.length > 0 && (
+            <div className={css.candidateEvidence}>
+              {guess.hits.map(hit => (
+                <span className={css.patternItem} key={hit.vendor} title={hit.tokens.join(' · ')}>
+                  <span className={css.patternKey}>{t(`vendor.${hit.vendor}`)}</span>
+                  <span className={css.patternCount}>×{hit.tokens.length}</span>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 

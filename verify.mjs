@@ -528,7 +528,11 @@ The user is asking for a quick fix. I think the issue is in the config.
   check('attr: minimax tool_call namespace gone in M3 (no fire)', mm.candidates.some(c => c.vendor === 'minimax'), false)
   check('attr: glm observation → zhipu top', tmpl('plan uses <|observation|> next').candidates[0]?.vendor, 'zhipu')
   const ds = tmpl('user asked; <｜Assistant｜> should reply')
-  check('attr: deepseek template token → deepseek likely', ds.candidates[0]?.vendor === 'deepseek' && ds.verdict === 'likely', true)
+  // 2026-09-26: Step-3.5 clones the full-width frame, so the shared row is
+  // tier-2 — DeepSeek caps at `possible` from template tokens alone.
+  check('attr: deepseek template token → deepseek possible (tier-2 shared with step)', ds.candidates[0]?.vendor === 'deepseek' && ds.verdict === 'possible', true)
+  const stp = tmpl('wrap up <|EOT|> now')
+  check('attr: step-3.5 EOT → step likely (step-unique tier-1)', stp.candidates[0]?.vendor === 'step' && stp.verdict === 'likely', true)
   const inst = tmpl('[INST] echoed frame')
   check('attr: [INST] credits mistral', inst.candidates[0]?.vendor, 'mistral')
   check('attr: [INST] no longer credits meta (old gen dropped)', inst.candidates.some(c => c.vendor === 'meta'), false)
