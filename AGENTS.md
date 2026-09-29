@@ -22,14 +22,15 @@
    - 退出码 0：窗口已全覆盖，本次结束，一句话报告，不做任何修改。
    - 退出码 1：npm registry 读取失败，失败关闭——不修改、不声明、不推送，报告错误后结束。
    - 退出码 2：取输出中的未声明版本列表，继续。
-3. 未声明版本中若出现非 0.1.x 系列（如 0.2.0）：停止，不声明、不推送，报告「出现新版本线，需要人工评估」后结束（插件按 0.1.x 客户端契约构建，跨系列必须人工跟进）。
+3. 未声明版本中若出现新版本线（如 0.2.0）：自动运行时停止，不声明、不推送，报告「出现新版本线，需要人工评估」后结束。跨系列必须人工跟进——仅当用户明确授权跟进该版本线后才继续步骤 4-7（插件运行时兼容性来自结构读取，探针通过 + 门禁全绿即可声明；0.2.0 线已于 2026-09-29 由用户授权跟进并声明）。
 4. `pnpm dsh-releases probe <未声明版本…>`。任何一项探针失败：该版本保持未声明（unknown），本次不做任何提交与推送，报告失败详情后结束。宁可 unknown，绝不写入未经证实的 compatible。
 5. 全部探针通过后修改文件：
    - `package.json`：每个新版本以 `"compatible"` 加入 `dsh.compatibility.dshReleases`（保留现有条目）；patch 版本号 +1；把六个 `@deepseek-ai` devDependencies（`dsh-brand`、`dsh-client-locale`、`dsh-client-store`、`dsh-client-ui-layout`、`dsh-client-ui-primitives`、`dsh-client-ui-slots`）的精确锁更新为本次已声明版本中最新的那个；其余字段不动。
+   - `package.json` 的 `dsh.compatibility.dsh` 范围声明：仅当新声明版本超出现有范围上下限时同步放宽（如跟进 0.2.x 时 `<0.2.0` 改 `<0.3.0`），避免与逐版本矩阵自相矛盾；其余字段仍不动。
    - `dsh-plugin.json`：仅把 `version` 改成与 `package.json` 一致。
    - 不修改 README（README 已注明矩阵以 package.json 为准；若出现新版本线，提醒用户人工更新 prose）。
-6. `pnpm install`，然后依次 `pnpm typecheck`、`pnpm test`、`pnpm compat`、`pnpm build`。任何一步失败：`git checkout -- package.json dsh-plugin.json pnpm-lock.yaml` 撤销，报告失败输出，不推送。
-7. 全部通过后提交：只 add `package.json dsh-plugin.json pnpm-lock.yaml`，提交信息第一行 `ModelTester <新版本号>: follow dsh <版本列表>`，正文注明：四项静态契约探针逐版本通过、证据为静态发行物比对、未做真实 Profile 实机验收。推送到 origin/main；被拒时不强推、不覆盖远端，报告后结束。
+6. `pnpm install`，然后依次 `pnpm typecheck`、`pnpm test`、`pnpm compat`、`pnpm build`。任何一步失败：`git checkout -- package.json dsh-plugin.json pnpm-lock.yaml verify-dsh-host.mjs` 撤销，报告失败输出，不推送。
+7. 全部通过后提交：只 add 本次实际修改的 `package.json dsh-plugin.json pnpm-lock.yaml`，若本次同步修订了 `verify-dsh-host.mjs`（如门禁脚本内硬编码的版本线假设过时）或本文件，一并 add；提交信息第一行 `ModelTester <新版本号>: follow dsh <版本列表>`，正文注明：四项静态契约探针逐版本通过、证据为静态发行物比对、未做真实 Profile 实机验收，并逐条列出对常规清单的偏离及理由。推送到 origin/main；被拒时不强推、不覆盖远端，报告后结束。
 
 ## 硬性边界
 
@@ -37,8 +38,8 @@
 - `npm publish` 属对外发布且需要凭证：发现 npm 上的 `dsh-modeltester` 版本落后于仓库版本时，只报告提醒用户发布，不自动执行。
 - 不要在 DSH-Store 的任何 issue 下回复、确认或关闭；商城状态全自动流转。
 
-## 当前基线（2026-09-25，品牌重构时更新）
+## 当前基线（2026-09-29，跨系列跟进 0.2.0 时更新）
 
-- 2026-09-25 品牌重构：NoLetMe 0.3.9 → ModelTester 0.0.1-alpha.1。新仓库 `Yuer6327/ModelTester`（全新 git 历史），npm 包 `dsh-modeltester` 尚未发布，DSH STORE 未上架；旧仓库 `Yuer6327/NoLetMe` 与其 STORE 条目冻结在 0.3.9，不再维护。
-- 兼容矩阵随代码继承：已声明 0.1.6-alpha.1 与 0.1.7 全线（alpha.1、alpha.2、rc.1、rc.2，其中 alpha.1/alpha.2/rc.2 为静态证据，0.1.6-alpha.1 与 0.1.7-rc.1 为历史实机验证）；dev lock 0.1.7-rc.2。
-- 下一个待跟进版本预计为 0.1.7-rc.3 或 0.1.8。
+- 2026-09-25 品牌重构：NoLetMe 0.3.9 → ModelTester 0.0.1-alpha.1。新仓库 `Yuer6327/ModelTester`（全新 git 历史）；旧仓库 `Yuer6327/NoLetMe` 与其 STORE 条目冻结在 0.3.9，不再维护。
+- 2026-09-29 首次跨系列跟进（用户授权）：插件 0.0.6-alpha.2；矩阵新增 0.2.0-rc.1、0.2.0-rc.2（均为静态证据）；dev lock 0.2.0-rc.2；范围声明放宽至 `<0.3.0`。npm 上 `dsh-modeltester` 停留在 0.0.5-alpha.2，仓库领先，发布由用户手动执行。
+- 下一个待跟进版本预计为 0.2.0-rc.3 或 0.2.0 正式版。

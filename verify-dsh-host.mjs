@@ -46,6 +46,10 @@ function compareNpm(a, b) {
 }
 
 const mismatches = []
+const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+const declaredCompatible = Object.entries(pkg.dsh?.compatibility?.dshReleases ?? {})
+  .filter(([, verdict]) => verdict === 'compatible')
+  .map(([version]) => version)
 for (const name of packages) {
   let version
   try {
@@ -54,9 +58,8 @@ for (const name of packages) {
     mismatches.push(`${name}: package metadata unavailable (${error.message})`)
     continue
   }
-  const majorMinor = version.split('.').slice(0, 2).join('.')
-  if (majorMinor !== '0.1') mismatches.push(`${name}: expected 0.1.x, found ${version}`)
-  else if (compareNpm(version, minimum) < 0) mismatches.push(`${name}: expected >= ${minimum}, found ${version}`)
+  if (compareNpm(version, minimum) < 0) mismatches.push(`${name}: expected >= ${minimum}, found ${version}`)
+  else if (!declaredCompatible.includes(version)) mismatches.push(`${name}: ${version} not declared compatible in dsh.dshReleases`)
   else console.log(`✓ ${name}@${version}`)
 }
 
@@ -84,5 +87,5 @@ if (mismatches.length > 0) {
   for (const mismatch of mismatches) console.error(`✗ ${mismatch}`)
   process.exitCode = 1
 } else {
-  console.log(`\ndsh >= ${minimum} (0.1.x) dependency + platform-seed contract verified ✓`)
+  console.log(`\ndsh >= ${minimum} dependency + dshReleases-declared + platform-seed contract verified ✓`)
 }
