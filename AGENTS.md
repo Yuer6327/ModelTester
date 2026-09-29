@@ -14,6 +14,7 @@
   3. dsh-client-ui-chat 的 `chat.legacy` 切片仍含 `nodes`/`partial`；
   4. dsh-api-session-controller 的 `SessionFace = ISession & ObservableSnapshot<SessionSnapshot>` 且有 `loadOlder()`。
 - 插件运行时兼容性按设计来自结构读取，不依赖依赖范围；因此静态探针通过即可作为 `compatible` 声明的依据，但静态探针不等于真实 Profile 实机验收。
+- **主环境（2026-09-29 起）**：用户以 DSH 官方桌面端为主操作环境（本机安装于 `D:\Users\Yuer6327\AppData\Local\Programs\DeepSeek Harness\`），已卸载 WorkBuddy 目录内的旧 dsh CLI。桌面端内置 dsh 版本读其 `resources\runtime\primary-runtime\runtime.json` 的 `desktopVersion`。桌面端随 npm 发行版同步更新，滚动窗口仍以 npm `@deepseek-ai/dsh` 为准，例行流程不变；桌面端更新发布新版本时同样按本规范跟进。插件发布到 npm 后提醒用户在桌面端插件页安装。
 
 ## 例行流程（每次运行执行）
 
