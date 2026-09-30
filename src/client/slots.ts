@@ -18,8 +18,12 @@ import type { StatsSnapshot } from './session-store.ts'
 export interface BatchTurnResult {
   readonly probeId: string
   readonly status: 'answered' | 'timeout' | 'failed'
-  /** Reasoning + visible text captured for this turn ('' when nothing arrived). */
+  /** Visible reply text captured for this turn ('' when nothing arrived). */
   readonly text: string
+  /** Prompt-side usage tokens (total − output) of this turn, when reported. */
+  readonly promptTokens?: number
+  /** Output (completion) tokens of this turn's reply, when reported. */
+  readonly outputTokens?: number
 }
 
 /** Progress event for one probe of a batch run. */
@@ -48,6 +52,24 @@ export interface ModelTesterActions {
     items: readonly { id: string; text: string }[],
     onProgress?: (progress: BatchProgress) => void,
   ): Promise<{ ok: boolean; error?: string; turns?: readonly BatchTurnResult[] }>
+  /**
+   * Fertility runner: like `runBatch`, but each item goes to its OWN fresh
+   * session. Per-turn prompt-side usage is then directly comparable across
+   * items (the host-managed context of one shared session would distort the
+   * deltas). Optional for the same reasons as `runBatch`.
+   */
+  runFertility?(
+    items: readonly { id: string; text: string }[],
+    onProgress?: (progress: BatchProgress) => void,
+  ): Promise<{ ok: boolean; error?: string; turns?: readonly BatchTurnResult[] }>
+  /**
+   * Bulk-remove sessions the plugin itself created during test runs.
+   * Feature-detected: the 0.1.7 host sessions face has no delete RPC, so this
+   * reports `unavailable` until a host ships one. Optional.
+   */
+  cleanupTestSessions?(
+    ids: readonly string[],
+  ): Promise<{ ok: boolean; error?: string; removed?: readonly string[] }>
 }
 
 /** Business face injected into the ModelTester panel component. */

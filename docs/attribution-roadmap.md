@@ -10,11 +10,13 @@
 
 ## 已落地（本计划之外，列出仅为对齐现状）
 
-- usage-delta fertility 指纹 —— drill `--usage` + `fingerprint-reference.py`（2026-09-25 定案 space-bunny-free = MiniMax-M3 tokenizer，L1=0；2026-09-26 扩容 T6–T9 后复测仍 L1=0，漂移审计稳定）。社区平行验证：r/opencodeCLI 用 7 条 canary 分词指纹把 Space Bunny Alpha 对准 MiniMax M3.1，r/singularity 用 95 探针全中把 Ox Alpha 对准 GLM-5 tokenizer——方法与本工具同型，属主流成熟路线。
+- usage-delta fertility 指纹 —— drill `--usage` + `fingerprint-reference.py`（2026-09-25 定案 space-bunny-free = MiniMax-M3 tokenizer，L1=0；2026-09-26 扩容 T6–T9 后复测仍 L1=0，漂移审计稳定）。社区平行验证：r/opencodeCLI 用 7 条 canary 分词指纹把 Space Bunny Alpha 对准 MiniMax M3.1，r/singularity 用 95 探针全中把 Ox Alpha 对准 GLM-5 tokenizer——方法与本工具同型，属主流成熟路线。**2026-09-26 已搬进面板**（`src/client/fertility.ts` + `fertility-score.ts`，FERTILITY_VERSION 1）：`usage 指纹` 按钮把 T0–T9 逐条发到**独立新会话**，读每轮 usage 的 prompt 侧 token（total−output，宿主节点结构读取），跨会话差分消掉网关包装常量（基线轮 prompt 侧同时作为 L2 包装常量显示），对 13 家官方 tokenizer 参照向量 L1 比对。单会话内逐轮差分的方案被实测否决——宿主动态管理上下文（压缩/截断/逐轮注入），轮间增量不等于文本 token。space-bunny-free 实测 9/9 维 L1=0 精确匹配 MiniMax（次近 llama L1=26），与 drill 两次定案一致。
 - logprobs 词表规模指纹 —— drill `--logprobs`（echo 分词向量 + 欠训练 token 概率画像 + 观测 max token id → 候选家族对；token id 需 vLLM 类服务端）。
 - 特殊 token 注入电池 —— drill `--inject`（家族停止符截断 + 假 token / 截断形态 / 400 拒绝 / 推理预算耗尽四类对照，promptΔ 判断 token 存活）。
 - 目录泄露 `--models`、错误包络 `--errors`、上下文天花板 `--context`、同网关 A/B `--sibling`、跨层综合判定 `--batch`（2026-09-26 实测 space-bunny-free：context ≥1M 实测、错误包络为 zen 包装层、注入面诚实无证据、usage 九维 L1=0 → MiniMax-M3）。
 - 面板批量测试 —— 探针扩到 11 个（新增工具格式诱发 / 拒答形状 / 上下文自述 / 身份格网 / 系统提示词提取），复选框多选 + 置信度排序 + 预计 token 数 + 一键批量（`runBatch` 单新会话逐条驱动）+ 聚合猜测卡（`src/client/batch.ts`，识别探针自列 token 防假阳性）。
+- 用户回声抑制 + 置信度系数（2026-09-26 两轮实机迭代，ATTRIBUTION_VERSION 9）：第一轮（v8）发现批量会话里模型思考复述探针列出的 token，引擎把 `tmpl-step` 等假点燃到 18 分（space-bunny 排成 Step 第一、MiniMax 第六）；第二轮实机复测发现 v8 的回声抑制**在真机上完全未生效**——宿主 `chat.legacy` 里用户类节点发布的是 `node.data`（`{kind:'user', content:[{type:'text',text}]}`），没有 `blocks` 字段，回声语料一直是空的，一整排 tier-1 模板行 95–100%（GLM 100% 第一、MiniMax 第七）。v9 修复：① 回声语料同时读 `content` 消息分片与 `blocks`；② **讨论回合抑制**——提示词列过模板 token 的回合，其推理中的模板/异常命中整体丢弃（覆盖类推派生 token：`<|im_start|>`→`<|im_end|>`、`[INST]`→`[/INST]`）；③ 批量家族扫描只看可见回复、跳过模板识别回合（`batchScanText`）；④ glitch 金丝雀行改无厂商方向（退化/干净复读方向相反，由人判，纯诊断行）——消除干净会话里 OpenAI 靠金丝雀默认登顶；⑤ 置信度系数（t1 0.95 / t2 0.45 / t3 0.12 基线 × 权重/6，noisy-OR）用于排名与判定。实机复测（space-bunny-free 批量 11/11）：归属「未匹配 / 暂无归属证据」、批量「本轮未产生可排名的证据」——假证据清零，真空是诚实的（该隐身条目服务层不漏模板 token，文本面无 MiniMax 正向证据）。
+- 隐身代号账本（2026-09-26 落地静态卡）：归属区附社区定案代号→家族对照（Space Bunny=MiniMax M3.1、Ox Alpha=GLM-5.3、Pony=GLM-5、Quasar/Optimus=GPT-4.1、Sherlock Dash=Grok 4.1 Fast、Hunter/Healer=小米 MiMo、Elephant=蚂蚁 Ling、Andromeda=NVIDIA Nemotron Nano 2 VL、Owl=美团 LongCat-2.0），纯参考、不参与评分；宿主不向插件暴露模型 id，自动匹配留待后续版本评估。
 
 ## Drill 端新手段（按调研优先级排序）
 
@@ -29,9 +31,12 @@
 
 ## 插件内新手段
 
-- **审查边界形状画像**（社区自称"最强行为信号"）：分级话题阶梯探针（同一话题按措辞烈度递进），中英双语同电池跑出边界剖面——各家的拒绝边界位置与形状是后训练管线的签名，且隐蔽模型无法只改名字就改变它。实现为复制粘贴探针包 + 被动扫描拒绝句式密度。注意分层与抗性：Lasso Security 指出单次配置变更即可扰动该信号，只作支持性证据、跨轮聚合。研究基础：refusal discovery（Discovering Forbidden Topics in Language Models）。
+- **R1 时代风格 folklore 退役（2026-09-26）**：traj-minimal / traj-standard / style-delve / style-emdash 行与面板「轨迹特征/关键词明细/犹豫压力」区整体移除（ATTRIBUTION_VERSION 10，持久化 v3）——style 是行业级后训练产物（space-bunny 等 MiniMax 血统模型呈现同类风格），不是结构证据；量化 tokenizer 层证据由面板内 usage 指纹承担。保留推理健康诊断（纯文本无 reasoning 告警）。
+- **审查边界形状画像**（社区自称"最强行为信号"）：拒答探针已升级为分级双语阶梯（3 话题 × 2 措辞烈度，2026-09-26）；进一步做成被动拒绝句式密度统计待评估。注意分层与抗性：Lasso Security 指出单次配置变更即可扰动该信号，只作支持性证据、跨轮聚合。研究基础：refusal discovery（Discovering Forbidden Topics in Language Models）。
+- **自报身份矛盾显示（2026-09-26 落地）**：批量结论卡显示身份探针回复中自称的厂商（bait 档），供人工与结构证据对照；自动矛盾判定因语义模糊暂缓。
+- **面板结果持久化 + 一键全量 + 会话清理（2026-09-26 落地）**：批量结论与 usage 指纹结论存 localStorage（记录机制版本 + 测量时间戳，形状/版本不符整体拒收），刷新后照常显示；「一键测试」升级为**全量电池**——自动遍历全部已注册测试项（11 探针 + fertility 序列，未来新增即自动纳入），usage 指纹按钮保留为单项快捷入口；runner 创建的会话 id 记入 `dsh-modeltester.test-sessions`，「清理测试会话」按钮特性探测宿主删除面——0.1.7 会话面只有 create/fork/rename/search/list，无删除 RPC，按钮如实提示待宿主支持。
 - **自报身份降级为 bait 档**：stealthprint 明确把 "who are you" 类探针排除在外，因为隐身模型的自述**频繁是诱饵**。原计划的自报身份格网保留但只进 tier-3/bait 档，且声明与结构证据矛盾时反而记为异常。
-- **隐身代号账本**：面板附一张社区已定案的代号→家族对照（Quasar/Optimus=GPT-4.1、Sherlock Dash=Grok 4.1 Fast、Pony=GLM-5、Hunter/Healer=小米 MiMo、Elephant=蚂蚁 Ling、Andromeda=NVIDIA Nemotron Nano 2 VL、Owl=美团 LongCat-2.0、Ox Alpha=GLM-5.3、Space Bunny=MiniMax M3.1……），新命中时给出"同型历史案例"参考。纯静态数据表 + 版本号。
+- **隐身代号账本**：面板附一张社区已定案的代号→家族对照（Quasar/Optimus=GPT-4.1、Sherlock Dash=Grok 4.1 Fast、Pony=GLM-5、Hunter/Healer=小米 MiMo、Elephant=蚂蚁 Ling、Andromeda=NVIDIA Nemotron Nano 2 VL、Owl=美团 LongCat-2.0、Ox Alpha=GLM-5.3、Space Bunny=MiniMax M3.1……），新命中时给出"同型历史案例"参考。纯静态数据表 + 版本号。**（静态卡已落地，见上「已落地」；自动匹配需宿主暴露模型 id，待评估。）**
 - **保留项**：reasoning 开头词直方图、思考语言配比（被动 derived 行， folklore 级）；工具调用格式诱发探针、system prompt 提取探针（主动触发器）。R1 时代的风格 folklore 行（traj-*、delve、em-dash）维持 weight-1 支持级不再加重，专注最新代际的结构性行。
 
 ## 明确不投入

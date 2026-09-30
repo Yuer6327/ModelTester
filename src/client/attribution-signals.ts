@@ -5,22 +5,20 @@
  * This is the data core of the attribution view. Every row is a *structural*
  * fingerprint (a leaked artifact, a trajectory vocabulary, a probe canary) —
  * never an identity claim. Community-attested artifacts start as tier-1/2
- * rows; folklore style markers stay tier-3; anything unrecorded is caught by
- * the generic anomaly detectors so a new dirty token surfaces as evidence
- * before it becomes a table row.
+ * rows; anything unrecorded is caught by the generic anomaly detectors so a
+ * new dirty token surfaces as evidence before it becomes a table row.
  *
  * Weights are deliberately small integers and only ever *support* a candidate:
  *   - tier 1 — vendor-directed infrastructure leaks (near-deterministic);
  *   - tier 2 — trajectory / unattributed-but-attested artifacts;
  *   - tier 3 — folklore style markers and probe echoes (manual judgement).
  * A candidate only reaches `likely` through a tier-1 row (see `attribution.ts`).
+ * R1-era style folklore (trajectory vocabulary, "delve", em-dash density) has
+ * been retired from the table — quantitative tokenizer evidence lives in
+ * `fertility.ts` (usage deltas), not in style folklore.
  *
  * Adding a community report is a one-row edit here; bump ATTRIBUTION_VERSION.
  */
-
-import { PATTERNS } from './keywords.ts'
-import type { WordCounts } from './stats.ts'
-import type { PatternCounts } from './stats.ts'
 
 /** Community-attested dirty tokens leaking into reasoning (case-insensitive substring). */
 const DIRTY_PATTERNS: readonly { id: string; pattern: RegExp }[] = [
@@ -32,7 +30,7 @@ const DIRTY_PATTERNS: readonly { id: string; pattern: RegExp }[] = [
 ]
 
 /** Version of the attribution table and scoring rules. */
-export const ATTRIBUTION_VERSION = 7 as const
+export const ATTRIBUTION_VERSION = 10 as const
 
 /** Vendor families the evidence table can support. */
 export type Vendor =
@@ -42,13 +40,12 @@ export type Vendor =
 /** Stable union of every signal id (scanned + derived) — also the locale key suffix. */
 export type SignalId =
   | 'antml-ns' | 'fp-v4pro' | 'fp-generic' | 'edm-func' | 'everyday-calc' | 'nameeee'
-  | 'style-delve' | 'anom-ns-tag' | 'anom-hex' | 'anom-ident' | 'anom-repeat'
+  | 'anom-ns-tag' | 'anom-hex' | 'anom-ident' | 'anom-repeat'
   | 'probe-glitch-r50k' | 'probe-glitch-cl100k' | 'probe-echo' | 'probe-cutoff' | 'probe-count'
   | 'probe-toolfmt' | 'probe-refusal' | 'probe-ctxwin' | 'probe-identity' | 'probe-sysprompt'
   | 'tmpl-minimax' | 'tmpl-kimi' | 'tmpl-glm' | 'tmpl-glm-roles' | 'tmpl-deepseek' | 'tmpl-llama' | 'tmpl-mistral-tools'
   | 'tmpl-inst' | 'tmpl-chatml' | 'tmpl-qwen' | 'tmpl-gemma' | 'tmpl-ling'
   | 'tmpl-xiaomi' | 'tmpl-meituan' | 'tmpl-internlm' | 'tmpl-step' | 'tmpl-yi'
-  | 'traj-minimal' | 'traj-standard' | 'style-emdash'
 
 /** Display order (also the tiebreak for equal scores). */
 export const VENDORS: readonly Vendor[] = [
@@ -389,16 +386,16 @@ const probeSignals: readonly AttributionSignal[] = [
       /\bguiActive\b/g, /\bpractition\b/g, /\bTPPStreamerBot\b/g, /\bTheNitromeFan\b/g,
       /龍喚士/g, /\bSpaceEngineers\b/g,
     ],
-    vendors: { openai: 1 },
-    rationale: 'GPT-2/r50k-family glitch canaries echoed (garak / SolidGoldMagikarp lists) — clean echo argues against that lineage, degeneration hints at it; judge manually.',
+    vendors: {},
+    rationale: 'GPT-2/r50k-family glitch canaries echoed (garak / SolidGoldMagikarp lists) — diagnostic only: a degenerate echo hints at that lineage, a clean echo argues against it; direction is a human judgement, so the row carries no vendor weight.',
   },
   {
     id: 'probe-glitch-cl100k',
     kind: 'probe',
     tier: 3,
     match: [/\bpetertodd\b/gi, /\b\u30c7\u30e5\u30fc\u30c9\u30a2\u30eb\b/g],
-    vendors: { openai: 1 },
-    rationale: 'cl100k glitch canaries echoed (petertodd / デュードアル from the "unspeakable glitch tokens" survey) — judge manually.',
+    vendors: {},
+    rationale: 'cl100k glitch canaries echoed (petertodd / デュードアル from the "unspeakable glitch tokens" survey) — diagnostic only: judge the echo shape manually.',
   },
   {
     id: 'probe-echo',
@@ -466,84 +463,15 @@ const probeSignals: readonly AttributionSignal[] = [
   },
 ]
 
-/** Regex rows (direct scan). Derived rows (trajectory density, em-dash style) are engine-computed. */
+/** Regex rows (direct scan). */
 export const SCANNED_SIGNALS: readonly AttributionSignal[] = [
   ...dirtySignals,
   ...leakSignals,
   ...templateSignals,
   ...anomalySignals,
   ...probeSignals,
-  {
-    id: 'style-delve',
-    kind: 'style',
-    tier: 3,
-    match: [/\bdelve(?:s|d)?\b/gi],
-    vendors: { openai: 1 },
-    rationale: '"delve" lexical folklore marker (GPT-4-era overuse); weak — style drifts across checkpoints.',
-  },
 ]
 
-/** Derived-row ids the engine computes from the counting-engine totals. */
-export const DERIVED_SIGNAL_IDS = ['traj-minimal', 'traj-standard', 'style-emdash'] as const
+/** All rows, for locale lookup and the ledger. */
+export const ALL_SIGNALS: readonly AttributionSignal[] = [...SCANNED_SIGNALS]
 
-export type DerivedSignalId = (typeof DERIVED_SIGNAL_IDS)[number]
-
-/** Vendor weights of the derived rows, exposed so the engine and tests share them. */
-export const DERIVED_SIGNALS: Readonly<Record<DerivedSignalId, AttributionSignal>> = {
-  'traj-minimal': {
-    id: 'traj-minimal',
-    kind: 'trajectory',
-    tier: 2,
-    match: [],
-    vendors: { deepseek: 1 },
-    rationale: 'We-need/Let\'s telegraphic minimal-trajectory fingerprint (0813 high-score runs). 2026-09-25 drill: opencode-zen space-bunny-free (community-guessed MiniMax) reasons in the same style — industry-level post-training style, support only.',
-  },
-  'traj-standard': {
-    id: 'traj-standard',
-    kind: 'trajectory',
-    tier: 2,
-    match: [],
-    vendors: { deepseek: 1 },
-    rationale: 'Let-me-heavy standard-trajectory fingerprint (0813 low-score runs). Same caveat as traj-minimal: style-level, cannot discriminate DeepSeek vs other vendors sharing the recipe.',
-  },
-  'style-emdash': {
-    id: 'style-emdash',
-    kind: 'style',
-    tier: 3,
-    match: [],
-    vendors: { anthropic: 1 },
-    rationale: 'Em-dash density folklore marker (≥3/1000 chars); weak — style folklore, not evidence of origin.',
-  },
-}
-
-/** All rows (scanned + derived), for locale lookup and the ledger. */
-export const ALL_SIGNALS: readonly AttributionSignal[] = [...SCANNED_SIGNALS, ...Object.values(DERIVED_SIGNALS)]
-
-/** Trajectory totals the engine needs to evaluate the derived rows. */
-export interface TrajectoryInput {
-  readonly words: WordCounts
-  readonly patterns: PatternCounts
-}
-
-/** Evaluate the derived-row firing rules against session totals. */
-export function derivedHits(
-  traj: TrajectoryInput,
-  emDashCount: number,
-  reasoningChars: number,
-): readonly { id: DerivedSignalId; count: number }[] {
-  const hits: { id: DerivedSignalId; count: number }[] = []
-  let efficient = 0
-  for (let i = 0; i < PATTERNS.length; i++) {
-    if (traj.patterns[i] === undefined || traj.patterns[i] === 0) continue
-    if (PATTERNS[i].group === 'efficient') efficient += traj.patterns[i]
-  }
-  // Minimal fingerprint: direct-action framing present, zero `let me`.
-  if (efficient >= 3 && traj.words.letMe === 0) hits.push({ id: 'traj-minimal', count: 1 })
-  // Standard fingerprint: let-me-heavy deliberation without the minimal frame.
-  if (traj.words.letMe >= 3 && efficient === 0) hits.push({ id: 'traj-standard', count: 1 })
-  // Em-dash density folklore (≥3 per 1000 reasoning chars).
-  if (reasoningChars >= 400 && emDashCount * 1000 / reasoningChars >= 3) {
-    hits.push({ id: 'style-emdash', count: 1 })
-  }
-  return hits
-}

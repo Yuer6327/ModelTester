@@ -21,6 +21,7 @@ import {
   conversationViewOf, type ConversationPort, type ConversationView, type ConversationNodeView,
 } from './conversation.ts'
 import { ModelTesterPanel } from './ModelTesterPanel.tsx'
+import { trackTestSession } from './panel-persist.ts'
 import { createStatsStore } from './session-store.ts'
 import type { BatchProgress, BatchTurnResult, ModelTesterActions, ModelTesterFace } from './slots.ts'
 import { en, NS, zh, type ModelTesterKey } from './locales.ts'
@@ -32,7 +33,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
 }
 
 /** Cordis services required by the browser half. */
-export const inject = ['slots', 'sessions', 'locale']
+export const inject = ['slots', 'sessions', 'uiConversation', 'locale']
 
 /**
  * Browser root context as far as apply() is concerned.
@@ -79,8 +80,13 @@ export function apply(ctx: ClientContext): void {
     id: 'modeltester',
     locale: NS,
     inject: (): ModelTesterFace => ({
-      hooks: { stats },
-      actions: { sendProbe: sendProbeOf(ctx), runBatch: runBatchOf(ctx) },
+    hooks: { stats },
+    actions: {
+      sendProbe: sendProbeOf(ctx),
+      runBatch: runBatchOf(ctx),
+      runFertility: runFertilityOf(ctx),
+      cleanupTestSessions: cleanupTestSessionsOf(ctx),
+    },
     }),
   }, ModelTesterPanel))
 }
@@ -108,6 +114,7 @@ function sendProbeOf(ctx: ClientContext): ModelTesterActions['sendProbe'] {
         return { ok: false, error: 'unavailable' }
       }
       const id = await sessions.create()
+      trackTestSession(id)
       sessions.open(id)
       const session = sessions.binding?.(id)?.session
       const prompt = (session as { prompt?: unknown } | undefined)?.prompt
@@ -121,6 +128,89 @@ function sendProbeOf(ctx: ClientContext): ModelTesterActions['sendProbe'] {
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
+  }
+}
+
+/**
+ * Fertility runner: each item gets its OWN fresh session. Per-turn
+ * prompt-side usage (totalTokens − outputTokens) is then the gateway wrapper
+ * plus that item's text under the serving tokenizer — differencing across
+ * items cancels the wrapper without any history accumulation the host's
+ * context management would distort.
+ */
+function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['runFertility']> {
+  return async (items, onProgress) => {
+    try {
+      const sessions = ctx.sessions as unknown as BatchSessionsPort
+      if (typeof sessions.create !== 'function' || typeof sessions.open !== 'function') {
+        return { ok: false, error: 'unavailable' }
+      }
+      const turns: BatchTurnResult[] = []
+      for (let index = 0; index < items.length; index++) {
+        const item = items[index]!
+        const report = (status: BatchProgress['status']): void =>
+          onProgress?.({ index, total: items.length, probeId: item.id, status })
+        report('sending')
+        const id = await sessions.create()
+        trackTestSession(id)
+        sessions.open(id)
+        const session = sessions.binding?.(id)?.session
+        const prompt = (session as { prompt?: unknown } | undefined)?.prompt
+        if (typeof prompt !== 'function') return { ok: false, error: 'unavailable' }
+        const send = (prompt as (parts: readonly { type: 'text'; text: string }[], mode: 'queue' | 'steer') =>
+          Promise<{ ok?: boolean; error?: { message?: string } }>).bind(session)
+        const result = await send([{ type: 'text', text: item.text }], 'queue')
+        if (result !== undefined && result !== null && result.ok === false) {
+          turns.push({ probeId: item.id, status: 'failed', text: '' })
+          report('failed')
+          continue
+        }
+        report('waiting')
+        const poll = pollOf(ctx, id, sessions)
+        if (poll === null) return { ok: false, error: 'unavailable' }
+        const turn = await waitForTurn(poll, 0, item.id)
+        turns.push(turn)
+        report(turn.status)
+      }
+      return { ok: true, turns }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+}
+
+/**
+ * Bulk cleanup of test-created sessions. The 0.1.7 host sessions face
+ * (create/fork/rename/search/list) exposes NO delete — feature-detect a
+ * removal member and report honestly when absent, so the button starts
+ * working the moment a host ships one.
+ */
+function cleanupTestSessionsOf(ctx: ClientContext): NonNullable<ModelTesterActions['cleanupTestSessions']> {
+  return async (ids) => {
+    const sessions = ctx.sessions as unknown as {
+      remove?: (id: string) => Promise<unknown> | unknown
+      delete?: (id: string) => Promise<unknown> | unknown
+      binding?: (id: string) => { session?: { remove?: (id: string) => Promise<unknown> | unknown } } | undefined
+    }
+    const removeOf = (id: string): (() => unknown) | null => {
+      if (typeof sessions.remove === 'function') return () => sessions.remove!(id)
+      if (typeof sessions.delete === 'function') return () => sessions.delete!(id)
+      const session = sessions.binding?.(id)?.session
+      if (session !== undefined && typeof session.remove === 'function') return () => session.remove!(id)
+      return null
+    }
+    const removed: string[] = []
+    for (const id of ids) {
+      const remove = removeOf(id)
+      if (remove === null) return { ok: false, error: 'unavailable', removed: [] }
+      try {
+        await remove()
+        removed.push(id)
+      } catch {
+        /* keep removing the rest */
+      }
+    }
+    return { ok: true, removed }
   }
 }
 
@@ -149,6 +239,7 @@ function runBatchOf(ctx: ClientContext): NonNullable<ModelTesterActions['runBatc
         return { ok: false, error: 'unavailable' }
       }
       const id = await sessions.create()
+      trackTestSession(id)
       sessions.open(id)
       const session = sessions.binding?.(id)?.session
       const prompt = (session as { prompt?: unknown } | undefined)?.prompt
@@ -222,10 +313,15 @@ function pollOf(
     : null
   if (readSession === null && readConversation === null) return null
   return () => {
-    const sessionRaw = readSession?.()
-    const conversationRaw = readConversation?.()
-    if (sessionRaw === undefined) return conversationRaw === undefined ? undefined : conversationViewOf(conversationRaw)
-    return conversationViewOf(sessionRaw, conversationRaw ?? sessionRaw)
+    try {
+      const sessionRaw = readSession?.()
+      const conversationRaw = readConversation?.()
+      if (sessionRaw === undefined) return conversationRaw === undefined ? undefined : conversationViewOf(conversationRaw)
+      return conversationViewOf(sessionRaw, conversationRaw ?? sessionRaw)
+    } catch {
+      // A session being created/opened may briefly publish nothing pollable.
+      return undefined
+    }
   }
 }
 
@@ -233,12 +329,32 @@ function assistantCountOf(view: ConversationView | undefined): number {
   return view?.nodes.filter(node => node.kind === 'assistant').length ?? 0
 }
 
+/** Visible reply text of the given nodes — the batch scanner's surface. */
 function blockTextOf(nodes: readonly ConversationNodeView[]): string {
   return nodes
     .flatMap(node => node.blocks ?? [])
-    .filter(block => (block.kind === 'reasoning' || block.kind === 'text') && typeof block.text === 'string')
+    .filter(block => block.kind === 'text' && typeof block.text === 'string')
     .map(block => block.text as string)
     .join('\n')
+}
+
+/**
+ * Host usage shape on assistant nodes (structural read, all optional): the
+ * TurnUsagePanel derives prompt-side tokens as totalTokens − outputTokens.
+ */
+interface NodeUsageView {
+  readonly totalTokens?: unknown
+  readonly outputTokens?: unknown
+}
+
+/** Read one assistant node's usage (undefined when the host omits it). */
+function usageOf(node: object): { promptTokens: number; outputTokens: number } | undefined {
+  const usage = (node as { usage?: unknown }).usage
+  if (typeof usage !== 'object' || usage === null) return undefined
+  const { totalTokens, outputTokens } = usage as NodeUsageView
+  if (typeof totalTokens !== 'number' || typeof outputTokens !== 'number') return undefined
+  if (!Number.isSafeInteger(totalTokens) || !Number.isSafeInteger(outputTokens)) return undefined
+  return { promptTokens: totalTokens - outputTokens, outputTokens }
 }
 
 /** Poll until a new complete assistant turn exists (partial folded) or time out. */
@@ -253,12 +369,14 @@ async function waitForTurn(
     const view = poll()
     const nodes = view?.nodes.filter(node => node.kind === 'assistant') ?? []
     if (nodes.length > before && view?.partial === null) {
-      return { probeId, status: 'answered', text: blockTextOf(nodes.slice(before)) }
+      const node = nodes[before]!
+      return { probeId, status: 'answered', text: blockTextOf(nodes.slice(before)), ...usageOf(node) }
     }
   }
   const view = poll()
   const nodes = view?.nodes.filter(node => node.kind === 'assistant') ?? []
-  return { probeId, status: 'timeout', text: blockTextOf(nodes.slice(before)) }
+  const node = nodes[before]
+  return { probeId, status: 'timeout', text: blockTextOf(nodes.slice(before)), ...(node === undefined ? {} : usageOf(node) ?? {}) }
 }
 /**
  * Resolve the 0.1.2+ conversation assembly for one session, if the host

@@ -23,6 +23,7 @@ import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import { createLiveConversation } from './session-source.ts'
 import { PERSISTENCE_VERSION, SessionStatsAccumulator } from './accumulator.ts'
 import type { ConversationPort, ConversationView, SessionPort, SessionsPort } from './conversation.ts'
+import { resolveCurrentSessionId } from './conversation.ts'
 import type { TrajectoryStats } from './stats.ts'
 
 /** State of the full-history synchronization for the current session. */
@@ -58,11 +59,6 @@ export type StatsStorage = Pick<Storage, 'getItem' | 'setItem'>
 
 function storageKey(sessionId: string): string {
   return `dsh-modeltester.stats.v${PERSISTENCE_VERSION}.${sessionId}`
-}
-
-/** Key used by 0.1.2 and earlier; retained for one-way migration. */
-function legacyStorageKey(sessionId: string): string {
-  return `dsh-modeltester.stats.${sessionId}`
 }
 
 /**
@@ -137,36 +133,25 @@ export function createStatsStore(
 
   const readPersisted = (sessionId: string): SessionStatsAccumulator => {
     if (storage === undefined) return new SessionStatsAccumulator()
-    const keys = [storageKey(sessionId), legacyStorageKey(sessionId)]
-    for (const key of keys) {
-      let raw: string | null
-      try {
-        raw = storage.getItem(key)
-      } catch {
-        continue
-      }
-      if (raw === null) continue
-      try {
-        const parsed: unknown = JSON.parse(raw)
-        const version = typeof parsed === 'object' && parsed !== null
-          ? (parsed as { v?: unknown }).v
-          : undefined
-        if (version !== 1 && version !== PERSISTENCE_VERSION) continue
-        const loaded = SessionStatsAccumulator.load(parsed)
-        // A valid legacy v1 record is rewritten under the versioned key. The
-        // old key is intentionally left intact because StatsStorage may not
-        // expose removeItem and other plugin versions may still use it.
-        if (key === legacyStorageKey(sessionId)
-          && typeof parsed === 'object' && parsed !== null
-          && (parsed as { v?: unknown }).v === 1) {
-          try { storage.setItem(storageKey(sessionId), JSON.stringify(loaded.persist())) } catch { /* best effort */ }
-        }
-        return loaded
-      } catch {
-        /* Try the legacy key if the current record is corrupt. */
-      }
+    let raw: string | null
+    try {
+      raw = storage.getItem(storageKey(sessionId))
+    } catch {
+      return new SessionStatsAccumulator()
     }
-    return new SessionStatsAccumulator()
+    if (raw === null) return new SessionStatsAccumulator()
+    try {
+      const parsed: unknown = JSON.parse(raw)
+      const version = typeof parsed === 'object' && parsed !== null
+        ? (parsed as { v?: unknown }).v
+        : undefined
+      // Older schema versions are rejected outright: the accumulator recounts.
+      if (version !== PERSISTENCE_VERSION) return new SessionStatsAccumulator()
+      return SessionStatsAccumulator.load(parsed)
+    } catch {
+      /* Corrupt record: recount from the live snapshot. */
+      return new SessionStatsAccumulator()
+    }
   }
 
   /** Page the complete history of a just-focused session into the snapshot. */
@@ -182,7 +167,7 @@ export function createStatsStore(
     let waitingForOpen = false
     try {
       while (pages < MAX_HISTORY_PAGES && gen === loadGen) {
-        if (sessions.list.getSnapshot().current !== sessionId) {
+        if (resolveCurrentSessionId(sessions) !== sessionId) {
           waitingForOpen = true
           break
         }

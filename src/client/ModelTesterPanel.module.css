@@ -58,18 +58,6 @@
   border-radius: 2px;
 }
 
-.chipDot[data-mode='efficient'] {
-  background: var(--dsw-alias-state-success-primary);
-}
-
-.chipDot[data-mode='hesitant'] {
-  background: var(--dsw-alias-state-warn-primary);
-}
-
-.chipDot[data-mode='neutral'] {
-  background: var(--dsw-alias-label-secondary);
-}
-
 .chipDot[data-attr='likely'] {
   background: var(--dsw-alias-brand-primary);
 }

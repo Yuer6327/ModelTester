@@ -14,6 +14,7 @@
   3. dsh-client-ui-chat 的 `chat.legacy` 切片仍含 `nodes`/`partial`；
   4. dsh-api-session-controller 的 `SessionFace = ISession & ObservableSnapshot<SessionSnapshot>` 且有 `loadOlder()`。
 - 插件运行时兼容性按设计来自结构读取，不依赖依赖范围；因此静态探针通过即可作为 `compatible` 声明的依据，但静态探针不等于真实 Profile 实机验收。
+- **0.2.0 线两个实机契约变化（2026-09-30 实测，静态探针不覆盖）**：① client 入口模块的 `export const inject` 数组从「激活顺序提示」变为 **ctx 服务授权清单**——插件用到的每个服务（`sessions`/`uiConversation`/…）都必须声明，缺失即运行时拿不到该服务（表现为面板「暂无会话」、actions 返回 `unavailable`）；② `sessions.list.getSnapshot()` 移除了 `current` 字段（0.2.0 形状为 `{ids, byId, phase, projectionsBySession}`），当前会话选择移入 `uiSession` 服务，可结构读取 `byId[id].retainedBy.mainView > 0` 兜底（ModelTester 0.0.6-alpha.3 已修，兼容双读）。
 - **主环境（2026-09-29 起）**：用户以 DSH 官方桌面端为主操作环境（本机安装于 `D:\Users\Yuer6327\AppData\Local\Programs\DeepSeek Harness\`），已卸载 WorkBuddy 目录内的旧 dsh CLI。桌面端内置 dsh 版本读其 `resources\runtime\primary-runtime\runtime.json` 的 `desktopVersion`。桌面端随 npm 发行版同步更新，滚动窗口仍以 npm `@deepseek-ai/dsh` 为准，例行流程不变；桌面端更新发布新版本时同样按本规范跟进。插件发布到 npm 后提醒用户在桌面端插件页安装。
 
 ## 例行流程（每次运行执行）

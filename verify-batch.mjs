@@ -6,7 +6,7 @@
  */
 import { deepEqual, ok } from 'node:assert/strict'
 
-const { estimateTokens, familyHitsOf, aggregateBatch, orderedProbes, recognitionListedTokens } =
+const { batchScanText, estimateTokens, familyHitsOf, identityClaimsOf, aggregateBatch, orderedProbes, recognitionListedTokens } =
   await import('./src/client/batch.ts')
 const { PROBES } = await import('./src/client/probes.ts')
 const { TOKENIZER_FEATURE_SETS } = await import('./src/client/tokenizers.ts')
@@ -57,6 +57,71 @@ check('familyHitsOf: second tokens of each set still score', () => {
   deepEqual(vendors, ['google', 'minimax', 'mistral', 'qwen'].sort())
 })
 
+check('batchScanText: recognition turn excluded so reasoning-derived tokens cannot score', () => {
+  // A reasoning text discussing the token list derives related tokens by
+  // analogy (`[/INST]` from `[INST]`) — the template turn is dropped whole.
+  const text = batchScanText([
+    { probeId: 'template', text: '认识，[/INST] 是关闭标记；对应 <|im_end|>' },
+    { probeId: 'toolformat', text: 'MT-TOOLFMT-4e8a21 native <minimax:tool_call>' },
+  ])
+  const hits = familyHitsOf(text).map(h => h.vendor)
+  ok(hits.includes('minimax'), `minimax missing: ${hits}`)
+  ok(!hits.includes('mistral') && !hits.includes('qwen'), `derived tokens leaked: ${hits}`)
+})
+
+check('batchScanText: fertility metering turns never feed the family scanner', () => {
+  const text = batchScanText([
+    { probeId: 'fert-T1', text: '</mm:think> [TOOL_CALLS]' },
+    { probeId: 'natural', text: 'plain answer' },
+  ])
+  deepEqual(familyHitsOf(text), [])
+})
+
+check('identityClaimsOf: self-report vendors extracted from the identity turn only', () => {
+  const claims = identityClaimsOf([
+    { probeId: 'identity', text: '我是 MiniMax 开发的助手，运行在闭源网关上。' },
+    { probeId: 'natural', text: 'I am an OpenAI-style agent.' },
+  ])
+  deepEqual(claims, ['minimax'])
+  deepEqual(identityClaimsOf([{ probeId: 'identity', text: '' }]), [])
+})
+
+check('panel persist: stored verdicts validate and malformed records reject', async () => {
+  const { parseStoredBatch, parseStoredFertility } = await import('./src/client/panel-persist.ts')
+  const fertility = parseStoredFertility({
+    at: '2026-09-26T08:00:00.000Z',
+    verdict: {
+      measured: 9, usable: true, wrapperBaseline: 11375, measuredCounts: { T0: 11377 },
+      candidates: [{ familyId: 'minimax-m3', l1: 0, dims: 9 }, { familyId: 'no-such-family', l1: 9, dims: 9 }],
+    },
+  })
+  ok(fertility === null, 'unknown familyId must reject the whole record')
+
+  const good = parseStoredFertility({
+    at: '2026-09-26T08:00:00.000Z',
+    verdict: {
+      measured: 9, usable: true, wrapperBaseline: 11375, measuredCounts: { T0: 11377 },
+      candidates: [{ familyId: 'minimax-m3', l1: 0, dims: 9 }],
+    },
+  })
+  ok(good !== null && good.verdict.candidates[0].family.id === 'minimax-m3' && good.verdict.candidates[0].l1 === 0,
+    'valid fertility record must rehydrate with the family object')
+
+  // Unknown vendor names survive as null ("nothing rankable") so records
+  // written before a vendor-table rename/retirement keep loading.
+  const unknownVendor = parseStoredBatch({ at: 'x', guess: { vendor: 'nope', confidence: 'high', confidenceValue: 1, hits: [] } })
+  ok(unknownVendor !== null && unknownVendor.guess.vendor === null,
+    'unknown vendor must coerce to null, record still loads')
+  const batch = parseStoredBatch({
+    at: '2026-09-26T08:00:00.000Z',
+    guess: { vendor: 'minimax', confidence: 'low', confidenceValue: 0.25, hits: [{ vendor: 'qwen', tokens: ['<|im_end|>'] }] },
+    claims: ['minimax', 'not-a-vendor'],
+    coverage: { answered: 11, total: 11 },
+  })
+  ok(batch !== null && batch.guess.vendor === 'minimax' && batch.claims.length === 1 && batch.coverage.answered === 11,
+    'valid batch record must parse with claims filtered to known vendors')
+})
+
 check('orderedProbes: structural canaries first, stable ordering', () => {
   const probes = orderedProbes()
   ok(probes[0].confidence === 3, `first probe confidence ${probes[0].confidence}`)
@@ -70,7 +135,7 @@ check('aggregateBatch: probe tokens + engine score rank the guess', () => {
   const guess = aggregateBatch({
     engine: {
       verdict: 'likely',
-      candidates: [{ vendor: 'deepseek', score: 5, tier1: 1, verdict: 'likely' }],
+      candidates: [{ vendor: 'deepseek', score: 5, confidence: 0.5, tier1: 1, verdict: 'likely' }],
       evidence: [],
       unattributed: [],
       turns: [],
@@ -80,14 +145,15 @@ check('aggregateBatch: probe tokens + engine score rank the guess', () => {
     total: 5,
   })
   ok(guess.vendor === 'deepseek', `top ${guess.vendor}`)
-  ok(guess.confidence === 'medium', `${guess.confidence} (deepseek 5 vs minimax 4 — close race stays medium)`)
+  ok(guess.confidence === 'medium', `${guess.confidence} (deepseek 0.5 vs minimax 0.4375 — close race stays medium)`)
+  ok(guess.confidenceValue > 0.4 && guess.confidenceValue < 0.6, `coefficient ${guess.confidenceValue} out of band`)
 })
 
 check('aggregateBatch: clear cross-layer lead reaches high confidence', () => {
   const guess = aggregateBatch({
     engine: {
       verdict: 'likely',
-      candidates: [{ vendor: 'minimax', score: 6, tier1: 1, verdict: 'likely' }],
+      candidates: [{ vendor: 'minimax', score: 6, confidence: 0.95, tier1: 1, verdict: 'likely' }],
       evidence: [],
       unattributed: [],
       turns: [],
@@ -97,12 +163,32 @@ check('aggregateBatch: clear cross-layer lead reaches high confidence', () => {
     total: 5,
   })
   ok(guess.vendor === 'minimax')
-  ok(guess.confidence === 'high', `${guess.confidence} (6 + 6 = 12, runner 0, tier1 + 3 tokens)`)
+  ok(guess.confidence === 'high', `${guess.confidence} (0.95 ⊕ 3 tokens ≈ 0.979, runner 0, tier1 + 3 tokens)`)
+  ok(guess.confidenceValue > 0.9 && guess.confidenceValue < 1, `coefficient ${guess.confidenceValue} out of band`)
+})
+
+check('aggregateBatch: engine coefficient outranks token-only support', () => {
+  // Equal scores: a tier-1 engine candidate must outrank probe-token support.
+  const guess = aggregateBatch({
+    engine: {
+      verdict: 'likely',
+      candidates: [{ vendor: 'step', score: 6, confidence: 0.95, tier1: 1, verdict: 'likely' }],
+      evidence: [],
+      unattributed: [],
+      turns: [],
+    },
+    hits: [{ vendor: 'minimax', tokens: ['<mm:think>', '<minimax:tool_call>', ']!p~['] }],
+    answered: 5,
+    total: 5,
+  })
+  ok(guess.vendor === 'step', `top ${guess.vendor} (0.95 vs token-only 0.578)`)
+  ok(guess.candidates[0].confidence > guess.candidates[1].confidence, 'confidence must order candidates')
 })
 
 check('aggregateBatch: nothing fires -> none', () => {
   const guess = aggregateBatch({ engine: null, hits: [], answered: 0, total: 5 })
   ok(guess.vendor === null && guess.confidence === 'none')
+  ok(guess.confidenceValue === 0, `coefficient ${guess.confidenceValue} should be 0`)
 })
 
 check('every probe sentinel and signal id has a zh locale key', async () => {

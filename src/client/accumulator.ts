@@ -1,56 +1,43 @@
 /**
  * Per-session trajectory accumulator with durable persistence.
  *
- * The accumulator folds assistant reasoning blocks into session counts using a
- * high-water mark over the monotonic `seq` space: nodes whose seq lies OUTSIDE
- * the already-counted [minSeq, maxSeq] range are new (appended messages have
- * higher seq; history paged in via `loadOlder` has lower seq), so a revisit
- * after reload folds only what is new and never re-walks the conversation.
+ * The accumulator folds assistant reasoning volumes into session counts using
+ * a high-water mark over the monotonic `seq` space: nodes whose seq lies
+ * OUTSIDE the already-counted [minSeq, maxSeq] range are new (appended
+ * messages have higher seq; history paged in via `loadOlder` has lower seq),
+ * so a revisit after reload folds only what is new and never re-walks the
+ * conversation.
  *
  * Compaction rewrites history under fresh seqs — a new `compaction` node whose
  * seq exceeds the last observed one resets the accumulator and recounts the
  * current window, so compacted sessions never double- or under-count.
  *
- * The block text itself is never recounted: `foldBlock` reuses the WeakMap
- * cache keyed by block identity (`stats.ts`).
+ * The block text itself is never recounted: `foldBlock` is idempotent per
+ * block and only reasoning blocks contribute.
  */
 
 import type { ConversationNodeView, ConversationView } from './conversation.ts'
 import { attributeSession, attributionTurnCacheFor } from './attribution.ts'
 import {
-  CLASSIFIER_VERSION, emptySessionCounts, foldBlock, toTrajectoryStats,
+  emptySessionCounts, foldBlock, toTrajectoryStats,
   type SessionCounts, type TrajectoryStats,
 } from './stats.ts'
-import { KEYWORD_TAXONOMY_VERSION } from './keywords.ts'
 
 /** Version of the persisted accumulator schema. */
-export const PERSISTENCE_VERSION = 2 as const
+export const PERSISTENCE_VERSION = 3 as const
 
-/** Shared serialized accumulator fields from every persisted schema. */
-interface PersistedSessionStatsFields {
+/** The current versioned schema written to localStorage. */
+export interface VersionedPersistedSessionStats {
+  v: typeof PERSISTENCE_VERSION
   minSeq: number
   maxSeq: number
   lastCompactionSeq: number
-  counts: SessionCounts
-  /** Visible-text diagnostic totals (never word-counted). */
+  blocks: number
+  chars: number
+  replies: number
   textBlocks: number
   textChars: number
 }
-
-/** The schema written by the previous release; retained for migration. */
-export interface LegacyPersistedSessionStats extends PersistedSessionStatsFields {
-  v: 1
-}
-
-/** The current versioned schema written to localStorage. */
-export interface VersionedPersistedSessionStats extends PersistedSessionStatsFields {
-  v: typeof PERSISTENCE_VERSION
-  taxonomyVersion: typeof KEYWORD_TAXONOMY_VERSION
-  classifierVersion: typeof CLASSIFIER_VERSION
-}
-
-/** Accepted persisted schemas. v1 is read and migrated to the current schema. */
-export type PersistedSessionStats = LegacyPersistedSessionStats | VersionedPersistedSessionStats
 
 /** Read a finite persisted number, defaulting malformed values to zero. */
 function finiteNumber(value: unknown): number {
@@ -62,7 +49,7 @@ export class SessionStatsAccumulator {
   private minSeq = Number.POSITIVE_INFINITY
   private maxSeq = Number.NEGATIVE_INFINITY
   private lastCompactionSeq = 0
-  /** Folded reasoning counts (the only surface word-counted). */
+  /** Folded reasoning volumes (the only surface counted). */
   readonly counts: SessionCounts = emptySessionCounts()
   /** Visible-text diagnostic totals — block count + characters only. */
   private textBlocks = 0
@@ -104,8 +91,6 @@ export class SessionStatsAccumulator {
   /** Trajectory stats for the current snapshot, including live in-flight blocks. */
   toStats(snapshot: ConversationView): TrajectoryStats {
     const live: SessionCounts = {
-      patterns: [...this.counts.patterns],
-      words: { ...this.counts.words },
       blocks: this.counts.blocks,
       chars: this.counts.chars,
       replies: this.counts.replies,
@@ -125,7 +110,7 @@ export class SessionStatsAccumulator {
       live,
       snapshot.partial !== null,
       { textBlocks, textChars },
-      attributeSession(snapshot, { words: live.words, patterns: live.patterns }, this.attributionTurnCache),
+      attributeSession(snapshot, this.attributionTurnCache),
     )
   }
 
@@ -138,18 +123,12 @@ export class SessionStatsAccumulator {
   persist(): VersionedPersistedSessionStats {
     return {
       v: PERSISTENCE_VERSION,
-      taxonomyVersion: KEYWORD_TAXONOMY_VERSION,
-      classifierVersion: CLASSIFIER_VERSION,
       minSeq: this.minSeq === Number.POSITIVE_INFINITY ? 0 : this.minSeq,
       maxSeq: this.maxSeq === Number.NEGATIVE_INFINITY ? -1 : this.maxSeq,
       lastCompactionSeq: this.lastCompactionSeq,
-      counts: {
-        patterns: [...this.counts.patterns],
-        words: { ...this.counts.words },
-        blocks: this.counts.blocks,
-        chars: this.counts.chars,
-        replies: this.counts.replies,
-      },
+      blocks: this.counts.blocks,
+      chars: this.counts.chars,
+      replies: this.counts.replies,
       textBlocks: this.textBlocks,
       textChars: this.textChars,
     }
@@ -161,50 +140,24 @@ export class SessionStatsAccumulator {
     if (typeof data !== 'object' || data === null) return acc
     const raw = data as {
       v?: unknown
-      taxonomyVersion?: unknown
-      classifierVersion?: unknown
       minSeq?: unknown
       maxSeq?: unknown
       lastCompactionSeq?: unknown
-      counts?: unknown
+      blocks?: unknown
+      chars?: unknown
+      replies?: unknown
       textBlocks?: unknown
       textChars?: unknown
     }
-    const isLegacy = raw.v === 1
-    const isCurrent = raw.v === PERSISTENCE_VERSION
-    if (!isLegacy && !isCurrent) return acc
-    if (isLegacy) {
-      // v1 used the same taxonomy/classifier rules but did not persist their
-      // identities. It is safe to migrate only while those original versions
-      // remain current; a future rule change must reject v1 and recount.
-      if (KEYWORD_TAXONOMY_VERSION !== 1 || CLASSIFIER_VERSION !== 1) return acc
-    } else if (raw.taxonomyVersion !== KEYWORD_TAXONOMY_VERSION
-      || raw.classifierVersion !== CLASSIFIER_VERSION) {
-      return acc
-    }
-    if (typeof raw.counts !== 'object' || raw.counts === null) return acc
-    const counts = raw.counts as Partial<SessionCounts>
-    acc.minSeq = typeof raw.minSeq === 'number' ? raw.minSeq : 0
-    acc.maxSeq = typeof raw.maxSeq === 'number' ? raw.maxSeq : -1
-    acc.lastCompactionSeq = typeof raw.lastCompactionSeq === 'number' ? raw.lastCompactionSeq : 0
-    acc.counts.blocks = finiteNumber(counts.blocks)
-    acc.counts.chars = finiteNumber(counts.chars)
-    acc.counts.replies = finiteNumber(counts.replies)
+    if (raw.v !== PERSISTENCE_VERSION) return acc
+    if (typeof raw.minSeq === 'number') acc.minSeq = raw.minSeq
+    if (typeof raw.maxSeq === 'number') acc.maxSeq = raw.maxSeq
+    if (typeof raw.lastCompactionSeq === 'number') acc.lastCompactionSeq = raw.lastCompactionSeq
+    acc.counts.blocks = finiteNumber(raw.blocks)
+    acc.counts.chars = finiteNumber(raw.chars)
+    acc.counts.replies = finiteNumber(raw.replies)
     acc.textBlocks = finiteNumber(raw.textBlocks)
     acc.textChars = finiteNumber(raw.textChars)
-    if (Array.isArray(counts.patterns)) {
-      for (let i = 0; i < acc.counts.patterns.length; i++) {
-        const value = counts.patterns[i]
-        acc.counts.patterns[i] = Number.isFinite(value) ? value : 0
-      }
-    }
-    const words = counts.words
-    if (typeof words === 'object' && words !== null) {
-      acc.counts.words.we = Number.isFinite(words.we) ? words.we : 0
-      acc.counts.words.lets = Number.isFinite(words.lets) ? words.lets : 0
-      acc.counts.words.letMe = Number.isFinite(words.letMe) ? words.letMe : 0
-      acc.counts.words.firstPerson = Number.isFinite(words.firstPerson) ? words.firstPerson : 0
-    }
     return acc
   }
 
@@ -224,12 +177,6 @@ export class SessionStatsAccumulator {
   private resetCounts(): void {
     this.minSeq = Number.POSITIVE_INFINITY
     this.maxSeq = Number.NEGATIVE_INFINITY
-    const fresh = emptySessionCounts()
-    for (let i = 0; i < fresh.patterns.length; i++) this.counts.patterns[i] = 0
-    this.counts.words.we = 0
-    this.counts.words.lets = 0
-    this.counts.words.letMe = 0
-    this.counts.words.firstPerson = 0
     this.counts.blocks = 0
     this.counts.chars = 0
     this.counts.replies = 0

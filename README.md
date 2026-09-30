@@ -20,17 +20,17 @@ ModelTester 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harne
 | **归属分析**（主视图） | 这个会话**像哪家**？ | 18 家厂商候选评分排名 + 证据账本（[`src/client/attribution.ts`](src/client/attribution.ts)） |
 | **模板 / 分词器指纹** | 服务栈的模板与词表是哪家的？ | 各家官方 tokenizer_config 特殊 token 的 tier-1 泄漏行（[`src/client/tokenizers.ts`](src/client/tokenizers.ts)） |
 | **脏 token 与泄漏物** | 底层漏出了什么工件？ | 社区证实清单 + 通用异常探测器：未收录泄漏自动入账本，供一行入表 |
-| **0813 轨迹指纹** | 后训练风格像哪条轨迹？ | `We need` / `Let me` / `The user wants` 词法（支持性证据，[`src/client/keywords.ts`](src/client/keywords.ts)） |
-| **探针包 + 批量测试** | 怎么主动取证？ | 11 个探针（工具格式诱发 / 模板识别 / glitch 电池 / 回声 / 字母计数 / 知识截止 / 拒答形状 / 上下文自述 / 自然任务 / 身份格网 / 系统提示词提取），按置信度排序；**复选框多选 + 预计 token 数 + 一键批量测试**（新开会话逐条发送等回复），跑完给出**猜测 + 置信度**（[`src/client/batch.ts`](src/client/batch.ts)）；旧宿主回退为逐条发送/复制 |
-| **fertility 指纹**（仓库工具） | 分词器**定量**是哪家？ | usage 差分 + 官方 tokenizer 本地比对；drill 另含词表规模指纹、特殊 token 注入、目录泄露、错误包络、上下文天花板、同网关 A/B 与跨层综合判定（`fingerprint-drill.mjs --batch`） |
+| **推理健康诊断** | reasoning 面完整吗？ | 纯文本输出（无 reasoning 块）或 reasoning 极少时给出告警——证据面不完整时如实提示，绝不编造统计（[`src/client/stats.ts`](src/client/stats.ts)） |
+| **探针包 + 一键全量测试** | 怎么主动取证？ | 11 个探针（工具格式诱发 / 模板识别 / glitch 电池 / 回声 / 字母计数 / 知识截止 / 拒答形状（分级双语阶梯） / 上下文自述 / 自然任务 / 身份格网 / 系统提示词提取），按置信度排序；**一键测试 = 全量电池**（自动包含全部探针 + usage 指纹及未来新增测试项，逐条开新会话），跑完给出**猜测 + 置信度**、自报身份（bait 档）与 usage 指纹两张结论卡；**所有结论跨刷新保留**（localStorage 持久化 + 机制版本校验 + 测量时间戳）；另附**清理测试会话**入口（0.1.7 宿主会话面无删除 API，特性探测到位后即生效）（[`src/client/batch.ts`](src/client/batch.ts)）；旧宿主回退为逐条发送/复制 |
+| **usage 指纹**（面板内） | 分词器**定量**是哪家？ | **一键 `usage 指纹`**：T0–T9 固定文本逐条新开会话，读每轮 usage 的 prompt 侧 token，跨会话差分消掉网关包装常量，对 13 家官方 tokenizer 参照向量做 **L1 比对**（L1=0 = 精确匹配；近邻对如实并列）（[`src/client/fertility.ts`](src/client/fertility.ts)）。仓库级 drill 另含词表规模指纹、特殊 token 注入、目录泄露、错误包络、上下文天花板、同网关 A/B 与跨层综合判定（`fingerprint-drill.mjs --batch`） |
 
 面板实时增量折叠流式输出、自动回填完整历史（≤30 页）、按会话本地持久化；不发送任何数据，不改动、不补丁宿主任何既有 UI。
 
 ## 归属分析（主视图）
 
-**判定规则**：扫描全部已加载推理文本（探针哨兵顺带扫可见回复），把命中的结构指纹按权重累到厂商候选上；候选达到「匹配」需要至少一条 **tier-1** 证据且明显领先第二名，仅 tier-2/3 证据封顶「疑似」，只有无厂商证据时显示「未匹配」并列出泄漏物。证据账本按信号去重（≤40 条），每条带首现轮次与 ±40 字上下文样本。
+**判定规则**：扫描全部已加载推理文本（探针哨兵顺带扫可见回复），把命中的结构指纹按权重累到厂商候选上；同时把每条证据按层级 × 权重校准为独立概率，noisy-OR 合成 0–100% 的**置信度系数**（tier-1 结构泄漏接近必中，tier-3 轶事级每条 <12%，堆再多也难过半）——候选按系数排名，达到「匹配」需要至少一条 **tier-1** 证据、系数 ≥75% 且明显领先第二名，仅 tier-2/3 证据封顶「疑似」，只有无厂商证据时显示「未匹配」并列出泄漏物。**用户回声抑制**：用户消息里出现过的 token（探针提示词本身会列出各家特殊 token），模型思考里再复述**不算**泄漏；**讨论回合抑制**：提示词里列了模板 token 的回合（模板识别探针、用户问 token 含义），该回合推理中的模板/异常命中整体视为讨论——包括模型类推写出的派生 token（`<|im_start|>`→`<|im_end|>`、`[INST]`→`[/INST]`）——批量测试的家族扫描同理只看**可见回复**且跳过模板识别回合。探针哨兵行豁免。证据账本按信号去重（≤40 条），每条带首现轮次与 ±40 字上下文样本。
 
-证据表（`ATTRIBUTION_VERSION = 5`，[`src/client/attribution-signals.ts`](src/client/attribution-signals.ts)）分层：
+证据表（`ATTRIBUTION_VERSION = 9`，[`src/client/attribution-signals.ts`](src/client/attribution-signals.ts)）分层：
 
 | 层 | 证据 | 厂商 | 权重 |
 |---|---|---|---:|
@@ -41,17 +41,20 @@ ModelTester 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harne
 | 2 · 轨迹词汇 | 0813 Minimal（`we need`/`let's` 且零 `let me`）与 Standard（`let me` 沉重）指纹 | DeepSeek 系 | 1（支持性） |
 | 2 · 已证实脏 token | `EDMFunc`、`everydaycalculation`、`Nameeee`（厂商未定） | 未归属 | — |
 | 2 · 异常探测器 | 未收录 XML 标签、长十六进制串、`EDMFunc` 样后端标识、退化重复 | 未归属 | — |
-| 3 · 风格轶事/探针 | `delve` 词癖、破折号密度、glitch 金丝雀（r50k/cl100k 分族，见下）、探针哨兵回声 | 弱支持 | 1 |
+| 3 · 风格轶事/探针 | `delve` 词癖、破折号密度、探针哨兵回声 | 弱支持 | 1 |
+| 3 · 诊断行（无厂商方向） | glitch 金丝雀（r50k/cl100k 分族，见下）——退化复读指向该血统、干净复读反而排除，方向由人判，不入评分 | 未归属 | — |
 
 glitch 金丝雀清单取自公开研究：[SolidGoldMagikarp（LessWrong）](https://www.lesswrong.com/posts/aPeJE8bSo6rAFoLqg/solidgoldmagikarp-plus-prompt-generation)、[arXiv:2404.09894](https://arxiv.org/abs/2404.09894) 与 [garak 扫描器公开表](https://github.com/NVIDIA/garak/blob/main/garak/probes/glitch.py)。
 
-- **模板泄漏行只扫推理**：探针**回答里引用**特殊 token 不触发归属，避免自产假阳性；模板识别探针仅供人工判读（末行假 token 是对照组）。
+- **模板泄漏行只扫推理**：探针**回答里引用**特殊 token 不触发归属，避免自产假阳性；**用户消息**里出现过的 token 在推理中复述同样不算（用户回声抑制），列过 token 的讨论回合整体豁免（派生 token 一并压制），探针哨兵行除外；模板识别探针仅供人工判读（末行假 token 是对照组）。
+- **置信度系数与排名**：面板每行候选显示置信度百分比与原始证据分；独立的结构证据胜过弱证据堆积，共享行（如 DeepSeek/Step 全角帧）由表内低权重体现、不再叠加。批量测试的「猜测 + 置信度」用同一系数合成引擎候选与探针诱发 token。
+- **隐身代号对照**：归属区附一张社区已定案的代号→家族静态对照卡（Space Bunny→MiniMax M3.1、Ox Alpha→GLM-5.3、Pony→GLM-5 等），**纯参考资料，不参与本会话评分**——命中代号时用它对照结构排名，而不是替代排名。
 - **异常探测器**抓的是表里还没有的泄漏物：命中进「未归属」账本，可直接抄给社区、一行入表（`ATTRIBUTION_VERSION` 随之递增）。
 - **证据账本**完整列出全部命中信号（层级着色、附上下文样本）；**证据包导出**一键复制 JSON（候选、证据、会话 id），纯本地。
 
 ### 实测案例：opencode-zen `space-bunny-free` = MiniMax-M3
 
-OpenCode Zen 的官方隐身模型（限时免费、零保留提供商），社区猜测为 MiniMax 新模型。用本插件的探针包直连 API 采集三轮输出跑面板同款代码路径：轨迹指纹全中（`We need` 电报体，efficient 18 / `let me` 0）但按行业级风格降权处理；无任何 tier-1 泄漏、glitch 逐字复读、字母计数答对 22——被动面诚实输出「未匹配」。**最终由 fertility 指纹定量定案**（见下）：五维 usage 差分向量与 MiniMax-M3 官方 tokenizer **精确一致（L1=0）**，其余 8 家全部偏离（llama 4、deepseek-v4 14、glm 16、ling/qwen 32、gemma 40、mistral 51）。
+OpenCode Zen 的官方隐身模型（限时免费、零保留提供商），社区猜测为 MiniMax 新模型。用本插件的探针包直连 API 采集三轮输出跑面板同款代码路径：无任何 tier-1 泄漏、glitch 逐字复读、字母计数答对 22——被动面诚实输出「未匹配」。**最终由 fertility 指纹定量定案**（见下）：五维 usage 差分向量与 MiniMax-M3 官方 tokenizer **精确一致（L1=0）**，其余 8 家全部偏离（llama 4、deepseek-v4 14、glm 16、ling/qwen 32、gemma 40、mistral 51）。2026-09-26 起该能力已搬进面板：space-bunny-free 实测 9/9 维 **L1=0 精确匹配 MiniMax**（次近 llama L1=26）。
 
 ### Fertility 指纹工具链（drill 模式，直连 API）
 
@@ -64,9 +67,9 @@ OpenCode Zen 的官方隐身模型（限时免费、零保留提供商），社�
 
 闭源/无公开 tokenizer 的厂商按层覆盖：Anthropic 由 antml 工件行、OpenAI 由 `fp_…` 行与 glitch 电池、xAI 与 NVIDIA（Nemotron 特殊 token 全是占位符）由目录泄露、词表规模簇与行为层覆盖。特征集与参照库均已刷新至各家族最新一代（2026-09-26 经代理自 HuggingFace 官方仓库重采，旧代文件移除）。
 
-## 0813 轨迹指纹
+## 已移除：0813 轨迹指纹（R1 时代风格 folklore）
 
-面板的「轨迹特征」区保留为归属评分的支持性证据：统计推理块中 `We need…` / `Let's…`（🟢 高效）、`Let me…` / `I think…`（🟠 犹豫）、`The user wants…`（⚪ 中性）的出现频次，依据 [xiaobright/modeltest](https://github.com/xiaobright/modeltest) 对 DeepSeek V4 Pro GA「0813」后训练过拟合事件的公开调研。词频只反映推理**风格**，不能判定后端或 checkpoint——因此在归属评分中仅作支持性证据（权重 1）。完整证据链见 [`docs/research.md`](docs/research.md)。
+早期版本统计推理块中 `We need…` / `Let me…` / `The user wants…` 的词频作 DeepSeek「0813」轨迹指纹（依据 [xiaobright/modeltest](https://github.com/xiaobright/modeltest) 调研）。2026-09-26 实测定案：style 是行业级后训练产物而非结构证据（space-bunny 等 MiniMax 血统模型同样呈现同类风格），该组信号已从面板与信号表整体移除，风格判读留给人。完整历史证据链见 [`docs/research.md`](docs/research.md)。
 
 ## 安装
 
@@ -130,7 +133,8 @@ src/
     ├── conversation.ts # 宿主快照结构子集（跨 0.1.x 版本）
     ├── session-source.ts / session-store.ts / accumulator.ts
     ├── stats.ts        # 计数引擎（0813 轨迹词汇 + 风格统计）
-    ├── keywords.ts     # 0813 关键词表
+    ├── fertility.ts     # usage 指纹探针文本 + 13 家官方 tokenizer 参照向量
+    ├── fertility-score.ts  # 跨会话差分 + L1 家族判定
     ├── attribution.ts / attribution-signals.ts  # 归属引擎 + 证据→厂商表
     ├── tokenizers.ts   # 各家官方 tokenizer 特征集（最新代）
     ├── probes.ts       # 探针包目录

@@ -26,11 +26,22 @@ export interface AssistantBlockView {
   readonly text?: string
 }
 
-/** One conversation node as far as counting and compaction reset are concerned. */
+/**
+ * One conversation node as far as counting and compaction reset are concerned.
+ * Field shapes differ by node kind on the host: assistant nodes carry
+ * `blocks` (`{kind,text}`), while user/steering/context nodes carry `content`
+ * message parts (`{type:'text',text}`) and compaction nodes carry a `summary`
+ * part list — both left as `unknown` because only user-side text extraction
+ * (attribution echo suppression) reads them, defensively.
+ */
 export interface ConversationNodeView {
   readonly kind: string
   readonly seq: number
   readonly blocks?: readonly AssistantBlockView[]
+  /** User-side message parts (`{type:'text',text}`) on user/steering/context nodes. */
+  readonly content?: unknown
+  /** Compaction summary parts (`{type:'text',text}`), when present. */
+  readonly summary?: unknown
 }
 
 /** In-flight assistant output. */
@@ -65,10 +76,40 @@ export interface SessionPort {
 /** `ctx.sessions` subset used by the live conversation observable. */
 export interface SessionsPort {
   readonly list: {
-    getSnapshot(): { readonly current?: string }
+    getSnapshot(): {
+      readonly current?: string
+      readonly ids?: readonly string[]
+      readonly byId?: Record<string, { id?: unknown; retainedBy?: { mainView?: number } }>
+    }
     subscribe(fn: () => void): () => void
   }
   binding(id: string): { readonly session: SessionPort } | undefined
+}
+
+/**
+ * Resolve the currently-open session id across host shapes.
+ *
+ * 0.1.x exposes the selection as `list.getSnapshot().current`; 0.2.0 dropped
+ * that field (the snapshot is `{ids, byId, phase, projectionsBySession}`) and
+ * moved the selection into the `uiSession` service, whose main view retains
+ * exactly one session — visible structurally as `retainedBy.mainView > 0` on
+ * the list row. Structural read keeps both hosts working without injecting
+ * `uiSession` (a React-hook-shaped service).
+ * @param sessions - `ctx.sessions` (session-controller service).
+ * @returns the open session id, or undefined when no session is open.
+ */
+export function resolveCurrentSessionId(sessions: SessionsPort): string | undefined {
+  const snap = sessions.list.getSnapshot()
+  if (typeof snap.current === 'string') return snap.current
+  if (snap.byId && Array.isArray(snap.ids)) {
+    for (const key of snap.ids) {
+      const row = snap.byId[key]
+      if (row && (row.retainedBy?.mainView ?? 0) > 0) {
+        return typeof row.id === 'string' ? row.id : key
+      }
+    }
+  }
+  return undefined
 }
 
 /**

@@ -21,10 +21,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { formatCount, type TrajectoryStats } from './stats.ts'
 import { evidencePack, type AttributionEvidence, type AttributionReport } from './attribution.ts'
-import { ALL_SIGNALS } from './attribution-signals.ts'
-import { aggregateBatch, estimateTokens, familyHitsOf, orderedProbes, type BatchGuess } from './batch.ts'
-import { type ProbeEntry } from './probes.ts'
-import { GROUPS, PATTERNS, type Group, type Mode } from './keywords.ts'
+import { ALL_SIGNALS, type Vendor } from './attribution-signals.ts'
+import { loadStoredBatch, loadStoredFertility, saveStoredBatch, saveStoredFertility, type StoredBatch, type StoredFertility } from './panel-persist.ts'
+import { aggregateBatch, batchScanText, estimateTokens, familyHitsOf, identityClaimsOf, orderedProbes, type BatchGuess } from './batch.ts'
+import { FERTILITY_VERSION, FERTILITY_FAMILIES, FERTILITY_TEXTS } from './fertility.ts'
+import { fertilitySequence, fertilityVerdictOf } from './fertility-score.ts'
+import { PROBES, type ProbeEntry } from './probes.ts'
+import { loadTestSessions, clearTestSessions } from './panel-persist.ts'
 import type { HistoryState } from './session-store.ts'
 import type { BatchProgress, ModelTesterActions, ModelTesterPanelProps } from './slots.ts'
 import css from './ModelTesterPanel.module.css'
@@ -46,19 +49,8 @@ const SPRING_OMEGA = (2 * Math.PI) / SPRING_RESPONSE
 const SPRING_K = SPRING_OMEGA * SPRING_OMEGA
 const SPRING_C = 2 * Math.sqrt(SPRING_K) // zeta = 1.0
 
-/** Accent color for dots and bars (bright state tokens). */
-const GROUP_ACCENT: Readonly<Record<Group, string>> = {
-  efficient: 'var(--dsw-alias-state-success-primary)',
-  hesitant: 'var(--dsw-alias-state-warn-primary)',
-  neutral: 'var(--dsw-alias-label-secondary)',
-}
-
-/** Readable text color for the mode badge (no background; warn uses the harness's readable label token). */
-const MODE_TEXT: Readonly<Record<Group, string>> = {
-  efficient: 'var(--dsw-alias-state-success-primary)',
-  hesitant: 'var(--dsw-alias-state-warn-label)',
-  neutral: 'var(--dsw-alias-label-secondary)',
-}
+/** Candidates shown before the "show all" expander kicks in. */
+const CANDIDATE_VISIBLE = 5
 
 /** Animated morph state. `o` = card-layer opacity (chip = 1 − o). */
 interface Morph {
@@ -207,13 +199,138 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
 
   const cardVisible = morph.o > 0
   const chipVisible = morph.o < 1
-  const mode = stats?.mode
   const attrTop = stats?.attribution.candidates[0]
+
+  // Run state lives HERE, not in ProbesSection: a run switches the current
+  // session (fertility: once per item), and a transient `stats === null`
+  // unmounts ProbesSection — component state there would be lost mid-run.
+  // Results are also persisted to localStorage so they survive a reload.
+  const statsRef = useRef(stats)
+  statsRef.current = stats
+
+  const [fertRunning, setFertRunning] = useState(false)
+  const [fertStatus, setFertStatus] = useState<Record<string, BatchProgress['status']>>({})
+  const [fertStored, setFertStored] = useState<StoredFertility | null>(loadStoredFertility)
+  const [fertError, setFertError] = useState('')
+
+  /** Fertility run: one fresh session per text, scored by usage deltas. */
+  const runFertility = async (): Promise<void> => {
+    if (fertRunning || actions?.runFertility === undefined) return
+    setFertRunning(true)
+    setFertStored(null)
+    setFertError('')
+    setFertStatus({})
+    const items = fertilitySequence()
+    try {
+      const response = await actions.runFertility(items, progress0 => {
+        setFertStatus(prev => ({ ...prev, [progress0.probeId]: progress0.status }))
+      })
+      if (!response.ok || response.turns === undefined) {
+        setFertError(response.error ?? 'unavailable')
+        return
+      }
+      const at = new Date().toISOString()
+      const verdict = fertilityVerdictOf(response.turns.map(turn => ({
+        probeId: turn.probeId,
+        status: turn.status,
+        promptTokens: turn.promptTokens ?? null,
+      })))
+      const record = { at, verdict }
+      setFertStored(record)
+      saveStoredFertility(record)
+    } catch {
+      setFertError('unavailable')
+    } finally {
+      setFertRunning(false)
+    }
+  }
+
+  const [batchRunning, setBatchRunning] = useState(false)
+  const [batchStatus, setBatchStatus] = useState<Record<string, BatchProgress['status']>>({})
+  const [batchStored, setBatchStored] = useState<StoredBatch | null>(loadStoredBatch)
+  const [batchError, setBatchError] = useState('')
+
+  /** Standard batch run: one fresh session, all given probes in order. */
+  const runBatch = async (items: readonly { id: string; text: string }[]): Promise<void> => {
+    if (batchRunning || actions?.runBatch === undefined) return
+    setBatchRunning(true)
+    setBatchStored(null)
+    setBatchError('')
+    setBatchStatus({})
+    try {
+      const response = await actions.runBatch(items, progress0 => {
+        setBatchStatus(prev => ({ ...prev, [progress0.probeId]: progress0.status }))
+      })
+      if (!response.ok || response.turns === undefined) {
+        setBatchError(response.error ?? 'unavailable')
+        return
+      }
+      const answered = response.turns.filter(turn => turn.status === 'answered').length
+      const record: StoredBatch = {
+        at: new Date().toISOString(),
+        guess: aggregateBatch({
+          engine: statsRef.current?.attribution ?? null,
+          hits: familyHitsOf(batchScanText(response.turns)),
+          answered,
+          total: items.length,
+        }),
+        claims: identityClaimsOf(response.turns),
+        coverage: { answered, total: items.length },
+      }
+      setBatchStored(record)
+      saveStoredBatch(record)
+    } catch {
+      setBatchError('unavailable')
+    } finally {
+      setBatchRunning(false)
+    }
+  }
+
+  const [cleanupBusy, setCleanupBusy] = useState(false)
+  const [cleanupMessage, setCleanupMessage] = useState<'' | 'none' | 'unavailable' | 'done'>('')
+  const [cleanupCount, setCleanupCount] = useState(0)
+
+  /**
+   * One-click FULL battery: every registered test item — all standard probes
+   * plus the fertility sequence, including anything added later — then both
+   * verdict cards. Selection-free by contract.
+   */
+  const runAllTests = async (): Promise<void> => {
+    if (batchRunning || fertRunning) return
+    await runBatch(PROBES.map(probe => ({ id: probe.id, text: probe.prompt })))
+    await runFertility()
+  }
+
+  /** Bulk-delete the sessions this plugin minted during test runs. */
+  const runCleanup = async (): Promise<void> => {
+    if (cleanupBusy || actions?.cleanupTestSessions === undefined) return
+    setCleanupBusy(true)
+    setCleanupMessage('')
+    const ids = loadTestSessions()
+    if (ids.length === 0) {
+      setCleanupMessage('none')
+      setCleanupBusy(false)
+      return
+    }
+    try {
+      const response = await actions.cleanupTestSessions(ids)
+      if (!response.ok) {
+        setCleanupMessage('unavailable')
+      } else {
+        clearTestSessions(response.removed ?? [])
+        setCleanupCount(response.removed?.length ?? 0)
+        setCleanupMessage('done')
+      }
+    } catch {
+      setCleanupMessage('unavailable')
+    } finally {
+      setCleanupBusy(false)
+    }
+  }
 
   return (
     <div
       className={css.root}
-      data-mode={mode}
       data-attr={stats?.attribution.verdict}
       data-streaming={stats?.streaming || undefined}
       role="region"
@@ -234,16 +351,10 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
           pointerEvents: morph.o < 0.5 ? 'auto' : 'none',
         }}
       >
-        <span className={css.chipDot} data-mode={mode} data-attr={stats?.attribution.verdict} aria-hidden="true" />
+        <span className={css.chipDot} data-attr={stats?.attribution.verdict} aria-hidden="true" />
         <span>ModelTester</span>
         {attrTop !== undefined && attrTop.verdict !== 'none' ? (
           <span className={css.chipMode} data-attr={attrTop.verdict}>{t(`vendor.${attrTop.vendor}`)}</span>
-        ) : mode === 'efficient' ? (
-          <span className={css.chipMode}>{t('mode.efficient')}</span>
-        ) : mode === 'hesitant' ? (
-          <span className={css.chipMode}>{t('mode.hesitant')}</span>
-        ) : mode === 'neutral' ? (
-          <span className={css.chipMode}>{t('mode.neutral')}</span>
         ) : null}
       </button>
 
@@ -267,10 +378,66 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
           loading={snap.loading}
           historyState={historyState}
           historyPages={historyPages}
+          fert={{
+            running: fertRunning,
+            status: fertStatus,
+            stored: fertStored,
+            error: fertError,
+            run: () => { void runFertility() },
+          }}
+          batch={{
+            running: batchRunning,
+            status: batchStatus,
+            stored: batchStored,
+            error: batchError,
+            run: () => { void runAllTests() },
+          }}
+          cleanup={{
+            busy: cleanupBusy,
+            message: cleanupMessage,
+            count: cleanupCount,
+            run: () => { void runCleanup() },
+          }}
         />
       </div>
     </div>
   )
+}
+
+/** Run state owned by the stable panel root (survives session switches). */
+interface FertState {
+  running: boolean
+  status: Record<string, BatchProgress['status']>
+  stored: StoredFertility | null
+  error: string
+  run: () => void
+}
+
+/** Batch-run state owned by the stable panel root (survives session switches). */
+interface BatchState {
+  running: boolean
+  status: Record<string, BatchProgress['status']>
+  stored: StoredBatch | null
+  error: string
+  run: () => void
+}
+
+/**
+ * Cleanup UI switch. The 0.1.7 host sessions face has no delete verb, and the
+ * durable archive API (`ctx.workspaceRegistry` archiveSession/unarchiveSession)
+ * stays inside the host — neither is reachable from the plugin contract face,
+ * so the button could only ever end in "unavailable". Hidden until a host face
+ * ships a plugin-reachable delete/archive verb; the action machinery and
+ * session tracking stay wired underneath.
+ */
+const CLEANUP_UI_SHOWN = false
+
+/** Test-session cleanup state owned by the stable panel root. */
+interface CleanupState {
+  busy: boolean
+  message: '' | 'none' | 'unavailable' | 'done'
+  count: number
+  run: () => void
 }
 
 /** Expanded card body. */
@@ -284,6 +451,9 @@ function PanelCard({
   loading,
   historyState,
   historyPages,
+  fert,
+  batch,
+  cleanup,
 }: {
   open: boolean
   onToggle: () => void
@@ -294,6 +464,9 @@ function PanelCard({
   loading: boolean
   historyState: HistoryState
   historyPages: number
+  fert: FertState
+  batch: BatchState
+  cleanup: CleanupState
 }) {
   return (
     <>
@@ -322,16 +495,14 @@ function PanelCard({
               <HistoryNotice state={historyState} pages={historyPages} t={t} />
             )}
             <AttributionSection stats={stats} sessionId={sessionId} t={t} />
-            <ProbesSection t={t} actions={actions} engine={stats.attribution} />
-            {stats.anomaly !== 'none' ? (
-              <ReasoningAlert stats={stats} t={t} />
-            ) : (
-              <>
-                <ModeSection stats={stats} t={t} />
-                <PatternSection stats={stats} t={t} />
-                <Footer stats={stats} t={t} />
-              </>
-            )}
+            <ProbesSection
+              t={t}
+              actions={actions}
+              fert={fert}
+              batch={batch}
+              cleanup={cleanup}
+            />
+            {stats.anomaly !== 'none' && <ReasoningAlert stats={stats} t={t} />}
           </>
         )}
       </div>
@@ -439,7 +610,11 @@ function AttributionSection({ stats, sessionId, t }: {
 }) {
   const attr = stats.attribution
   const [exported, setExported] = useState(false)
-  const totalScore = attr.candidates.reduce((sum, c) => sum + c.score, 0)
+  const [showAll, setShowAll] = useState(false)
+  // Only the strongest suspects are shown by default; the rest stay one
+  // click away (rank order is confidence, so the cut is at the tail).
+  const visibleCandidates = showAll ? attr.candidates : attr.candidates.slice(0, CANDIDATE_VISIBLE)
+  const hiddenCount = attr.candidates.length - visibleCandidates.length
 
   const exportEvidence = async (): Promise<void> => {
     try {
@@ -476,34 +651,46 @@ function AttributionSection({ stats, sessionId, t }: {
       {attr.candidates.length === 0 ? (
         <p className={css.empty}>{t('attr.empty')}</p>
       ) : (
-        attr.candidates.map((candidate, rank) => {
-          const own = attr.evidence.filter(entry => entry.vendor === candidate.vendor)
-          const share = totalScore > 0 ? Math.round((candidate.score / totalScore) * 100) : 0
-          return (
-            <div className={css.candidate} data-attr={candidate.verdict} key={candidate.vendor}>
-              <div className={css.candidateHead}>
-                <span className={css.candidateRank} aria-hidden="true">{rank + 1}</span>
-                <span className={css.candidateName}>{t(`vendor.${candidate.vendor}`)}</span>
-                <span className={css.candidateScore}>
-                  <b>{candidate.score}</b>
-                  {' '}
-                  {share}%
-                  {candidate.verdict !== 'none' ? ` · ${t(`attr.${candidate.verdict}`)}` : ''}
-                </span>
-              </div>
-              <div className={css.confidenceBar} aria-hidden="true">
-                <span style={{ width: `${Math.max(4, share)}%` }} />
-              </div>
-              {own.length > 0 && (
-                <div className={css.candidateEvidence}>
-                  {own.map(entry => (
-                    <EvidenceRow key={entry.id} entry={entry} t={t} />
-                  ))}
+        <>
+          {visibleCandidates.map((candidate, rank) => {
+            const own = attr.evidence.filter(entry => entry.vendor === candidate.vendor)
+            const confidence = Math.round(candidate.confidence * 100)
+            return (
+              <div className={css.candidate} data-attr={candidate.verdict} key={candidate.vendor}>
+                <div className={css.candidateHead}>
+                  <span className={css.candidateRank} aria-hidden="true">{rank + 1}</span>
+                  <span className={css.candidateName}>{t(`vendor.${candidate.vendor}`)}</span>
+                  <span className={css.candidateScore}>
+                    <b>{confidence}%</b>
+                    {' '}
+                    {t('attr.score')} {candidate.score}
+                    {candidate.verdict !== 'none' ? ` · ${t(`attr.${candidate.verdict}`)}` : ''}
+                  </span>
                 </div>
-              )}
-            </div>
-          )
-        })
+                <div className={css.confidenceBar} aria-hidden="true">
+                  <span style={{ width: `${Math.max(4, confidence)}%` }} />
+                </div>
+                {own.length > 0 && (
+                  <div className={css.candidateEvidence}>
+                    {own.map(entry => (
+                      <EvidenceRow key={entry.id} entry={entry} t={t} />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+          {hiddenCount > 0 && (
+            <button type="button" className={css.probeBtn} onClick={() => setShowAll(true)}>
+              {t('attr.showAll')} ({hiddenCount})
+            </button>
+          )}
+          {showAll && attr.candidates.length > CANDIDATE_VISIBLE && (
+            <button type="button" className={css.probeBtn} onClick={() => setShowAll(false)}>
+              {t('attr.showTop')}
+            </button>
+          )}
+        </>
       )}
       {attr.unattributed.length > 0 && (
         <p className={css.leakFacts}>
@@ -542,67 +729,27 @@ function EvidenceRow({ entry, t }: { entry: AttributionEvidence; t: ModelTesterP
 
 /**
  * Probe kit + batch runner. When the host face supports `runBatch`, the
- * section becomes a checklist: probes ordered by structural confidence, each
- * with a token-cost estimate, select-all, and a one-click run that drives all
- * selected probes through one fresh session and reports a ranked guess with a
- * confidence label. Without the batch face, rows keep the per-probe
- * send/copy fallback.
+ * section offers the one-click FULL battery — every registered test item
+ * (all standard probes plus the fertility sequence, including anything added
+ * later) — with both verdict cards; results persist across reloads. Without
+ * the batch face, rows keep the per-probe send/copy fallback.
  */
-function ProbesSection({ t, actions, engine }: {
+function ProbesSection({ t, actions, fert, batch, cleanup }: {
   t: ModelTesterPanelProps['t']
   actions?: ModelTesterActions
-  engine: AttributionReport
+  fert: FertState
+  batch: BatchState
+  cleanup: CleanupState
 }) {
   const probes = useMemo(() => orderedProbes(), [])
   const canBatch = typeof actions?.runBatch === 'function'
+  const canFertility = typeof actions?.runFertility === 'function'
   const canSend = typeof actions?.sendProbe === 'function'
-  const [selected, setSelected] = useState<Set<string>>(() => new Set(probes.map(p => p.id)))
-  const [running, setRunning] = useState(false)
-  const [progress, setProgress] = useState<Record<string, BatchProgress['status']>>({})
-  const [guess, setGuess] = useState<BatchGuess | null>(null)
-  const [coverage, setCoverage] = useState({ answered: 0, total: 0 })
-  const [error, setError] = useState('')
-
-  const selectedProbes = probes.filter(probe => selected.has(probe.id))
-  const totalTokens = selectedProbes.reduce((sum, probe) => sum + estimateTokens(probe.prompt), 0)
-
-  const toggle = (id: string): void => {
-    setSelected(prev => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-  }
-  const toggleAll = (): void => {
-    setSelected(prev => (prev.size === probes.length ? new Set<string>() : new Set(probes.map(p => p.id))))
-  }
-
-  const run = async (): Promise<void> => {
-    if (running || !canBatch || actions?.runBatch === undefined || selectedProbes.length === 0) return
-    setRunning(true)
-    setGuess(null)
-    setError('')
-    setProgress({})
-    const items = selectedProbes.map(probe => ({ id: probe.id, text: probe.prompt }))
-    try {
-      const response = await actions.runBatch(items, progress0 => {
-        setProgress(prev => ({ ...prev, [progress0.probeId]: progress0.status }))
-      })
-      if (!response.ok || response.turns === undefined) {
-        setError(response.error ?? 'unavailable')
-        return
-      }
-      const text = response.turns.map(turn => turn.text).join('\n')
-      const answered = response.turns.filter(turn => turn.status === 'answered').length
-      setCoverage({ answered, total: items.length })
-      setGuess(aggregateBatch({ engine, hits: familyHitsOf(text), answered, total: items.length }))
-    } catch {
-      setError('unavailable')
-    } finally {
-      setRunning(false)
-    }
-  }
+  const trackedSessions = useMemo(() => loadTestSessions().length, [])
+  const batteryTokens = useMemo(() => {
+    const prompts = [...PROBES.map(p => p.prompt), ...FERTILITY_TEXTS.map(t => t.text)]
+    return prompts.reduce((sum, prompt) => sum + estimateTokens(prompt), 0)
+  }, [])
 
   return (
     <section className={css.section}>
@@ -610,24 +757,33 @@ function ProbesSection({ t, actions, engine }: {
         <h3 className={css.modeLabel}>{t('attr.probes')}</h3>
         <span className={css.attrBadge}>{t('attr.probesHint')}</span>
       </div>
-      {canBatch && (
+      {(canBatch || canFertility) && (
         <div className={css.batchBar}>
-          <label className={css.batchSelectAll}>
-            <input
-              type="checkbox"
-              checked={selected.size === probes.length}
-              ref={node => {
-                if (node !== null) node.indeterminate = selected.size > 0 && selected.size < probes.length
-              }}
-              onChange={toggleAll}
-            />
-            {t('attr.batch.selectAll')}
-          </label>
-          <span className={css.batchTokens}>≈{formatCount(totalTokens)} tok</span>
-          <button type="button" className={css.probeBtn} disabled={running || selectedProbes.length === 0} onClick={() => { void run() }}>
-            {running ? t('attr.batch.running') : t('attr.batch.run')}
+          <span className={css.batchTokens}>≈{formatCount(batteryTokens)} tok</span>
+          <button
+            type="button"
+            className={css.probeBtn}
+            disabled={fert.running || !canFertility}
+            title={t('attr.fertility.note')}
+            onClick={fert.run}
+          >
+            {fert.running ? t('attr.batch.running') : t('attr.fertility.run')}
+          </button>
+          <button
+            type="button"
+            className={css.probeBtn}
+            disabled={batch.running || fert.running || !canBatch}
+            title={t('attr.batch.allNote')}
+            onClick={batch.run}
+          >
+            {batch.running || fert.running ? t('attr.batch.running') : t('attr.batch.run')}
           </button>
         </div>
+      )}
+      {canBatch && batch.running && (
+        <p className={css.empty}>
+          {t('attr.batch.progress')} {Object.values(batch.status).filter(s => s === 'answered' || s === 'timeout').length}/{PROBES.length}
+        </p>
       )}
       <div className={css.patternList}>
         {probes.map(probe => (
@@ -637,26 +793,45 @@ function ProbesSection({ t, actions, engine }: {
             t={t}
             actions={actions}
             canBatch={canBatch}
-            selected={selected.has(probe.id)}
-            onToggle={toggle}
-            status={progress[probe.id]}
+            status={batch.status[probe.id]}
           />
         ))}
       </div>
-      {error !== '' && <p className={css.empty}>{t('attr.batch.unavailable')}</p>}
-      {guess !== null && <BatchGuessCard guess={guess} coverage={coverage} t={t} />}
+      {batch.error !== '' && <p className={css.empty}>{t('attr.batch.unavailable')}</p>}
+      {fert.running && (
+        <p className={css.empty}>
+          {t('attr.fertility.progress')} {Object.values(fert.status).filter(s => s === 'answered' || s === 'timeout').length}/{fertilitySequence().length}
+        </p>
+      )}
+      {fert.error !== '' && <p className={css.empty}>{t('attr.batch.unavailable')}</p>}
+      {fert.stored !== null && <FertilityCard stored={fert.stored} t={t} />}
+      {batch.stored !== null && <BatchGuessCard stored={batch.stored} t={t} />}
+      {CLEANUP_UI_SHOWN && canBatch && (
+        <div className={css.batchBar}>
+          <button
+            type="button"
+            className={css.probeBtn}
+            disabled={cleanup.busy}
+            title={t('attr.cleanup.note')}
+            onClick={cleanup.run}
+          >
+            {cleanup.busy ? t('attr.batch.running') : `${t('attr.cleanup.run')}${trackedSessions > 0 ? ` (${trackedSessions})` : ''}`}
+          </button>
+          {cleanup.message === 'done' && <span className={css.empty}>{t('attr.cleanup.done')} {cleanup.count}</span>}
+          {cleanup.message === 'none' && <span className={css.empty}>{t('attr.cleanup.none')}</span>}
+          {cleanup.message === 'unavailable' && <span className={css.empty}>{t('attr.cleanup.unavailable')}</span>}
+        </div>
+      )}
     </section>
   )
 }
 
 /** One probe row of the batch checklist (or the send/copy fallback). */
-function ProbeRow({ probe, t, actions, canBatch, selected, onToggle, status }: {
+function ProbeRow({ probe, t, actions, canBatch, status }: {
   probe: ProbeEntry
   t: ModelTesterPanelProps['t']
   actions?: ModelTesterActions
   canBatch: boolean
-  selected: boolean
-  onToggle: (id: string) => void
   status: BatchProgress['status'] | undefined
 }) {
   const [feedback, setFeedback] = useState('')
@@ -683,9 +858,6 @@ function ProbeRow({ probe, t, actions, canBatch, selected, onToggle, status }: {
 
   return (
     <span className={css.patternItem} title={t(`attr.probe.${probe.id}.note`)}>
-      {canBatch && (
-        <input type="checkbox" className={css.batchCheck} checked={selected} onChange={() => onToggle(probe.id)} />
-      )}
       <span className={css.patternKey}>{t(`attr.probe.${probe.id}`)}</span>
       <span className={css.batchConf} data-conf={probe.confidence}>{t(`attr.conf.${probe.confidence}`)}</span>
       <span className={css.batchTokens}>≈{estimateTokens(probe.prompt)}</span>
@@ -708,12 +880,63 @@ function ProbeRow({ probe, t, actions, canBatch, selected, onToggle, status }: {
   )
 }
 
-/** The batch aggregate: ranked guess + confidence + coverage + elicited tokens. */
-function BatchGuessCard({ guess, coverage, t }: {
-  guess: BatchGuess
-  coverage: { answered: number; total: number }
+/** The fertility verdict: usage-delta fingerprint vs official tokenizers. */
+function FertilityCard({ stored, t }: {
+  stored: StoredFertility
   t: ModelTesterPanelProps['t']
 }) {
+  const verdict = stored.verdict
+  const top = verdict.candidates[0]
+  const exact = top !== undefined && top.l1 === 0 && verdict.measured === 9
+  const tie = verdict.candidates[1] !== undefined && verdict.candidates[1].l1 === top.l1
+  const tied = tie ? verdict.candidates.filter(candidate => candidate.l1 === top.l1) : [top]
+  return (
+    <div className={css.batchGuess} data-confidence={exact ? 'high' : 'low'}>
+      <div className={css.modeRow}>
+        <h3 className={css.modeLabel}>{t('attr.fertility.card')}</h3>
+        <span className={css.attrBadge}>{t('attr.fertility.coverage')} {verdict.measured}/9</span>
+      </div>
+      {!verdict.usable || top === undefined ? (
+        <p className={css.empty}>{t('attr.fertility.incomplete')}</p>
+      ) : (
+        <>
+          <div className={css.candidate} data-attr={exact ? 'likely' : 'possible'}>
+            <div className={css.candidateHead}>
+              <span className={css.candidateName}>
+                {tied.length > 1
+                  ? tied.map(candidate => t(`vendor.${candidate.family.vendor}`)).join(' / ')
+                  : t(`vendor.${top.family.vendor}`)}
+              </span>
+              <span className={css.candidateScore}>
+                L1 <b>{top.l1}</b>
+                {exact ? ` · ${t('attr.fertility.exact')}` : tie ? ` · ${t('attr.fertility.pair')}` : ''}
+              </span>
+            </div>
+            <div className={css.candidateEvidence}>
+              {verdict.candidates.slice(0, 3).map(candidate => (
+                <span className={css.patternItem} key={candidate.family.id} title={candidate.family.model}>
+                  <span className={css.patternKey}>{t(`vendor.${candidate.family.vendor}`)}</span>
+                  <span className={css.patternCount}>L1 {candidate.l1}</span>
+                </span>
+              ))}
+            </div>
+          </div>
+          {verdict.wrapperBaseline !== null && (
+            <p className={css.leakFacts}>{t('attr.fertility.wrapper')} {verdict.wrapperBaseline}</p>
+          )}
+          <p className={css.leakFacts}>{t('attr.fertility.measuredAt')} {new Date(stored.at).toLocaleString()}</p>
+        </>
+      )}
+    </div>
+  )
+}
+
+/** The batch aggregate: ranked guess + confidence + coverage + elicited tokens. */
+function BatchGuessCard({ stored, t }: {
+  stored: StoredBatch
+  t: ModelTesterPanelProps['t']
+}) {
+  const { guess, claims, coverage, at } = stored
   return (
     <div className={css.batchGuess} data-confidence={guess.confidence}>
       <div className={css.modeRow}>
@@ -726,7 +949,10 @@ function BatchGuessCard({ guess, coverage, t }: {
         <div className={css.candidate} data-attr={guess.confidence === 'high' ? 'likely' : guess.confidence === 'none' ? 'none' : 'possible'}>
           <div className={css.candidateHead}>
             <span className={css.candidateName}>{t(`vendor.${guess.vendor}`)}</span>
-            <span className={css.candidateScore}>{t('attr.batch.confidence')} <b>{t(`attr.batch.conf.${guess.confidence}`)}</b></span>
+            <span className={css.candidateScore}>
+              {t('attr.batch.confidence')} <b>{t(`attr.batch.conf.${guess.confidence}`)}</b>
+              {guess.confidenceValue > 0 ? ` · ${Math.round(guess.confidenceValue * 100)}%` : ''}
+            </span>
           </div>
           {guess.hits.length > 0 && (
             <div className={css.candidateEvidence}>
@@ -738,106 +964,17 @@ function BatchGuessCard({ guess, coverage, t }: {
               ))}
             </div>
           )}
+          {claims.length > 0 && (
+            <p className={css.leakFacts}>
+              {t('attr.batch.selfReport')}
+              {claims.map(claim => (
+                <code className={css.leakCode} key={claim}>{t(`vendor.${claim}`)}</code>
+              ))}
+            </p>
+          )}
+          <p className={css.leakFacts}>{t('attr.batch.measuredAt')} {new Date(at).toLocaleString()}</p>
         </div>
       )}
     </div>
   )
 }
-
-/** Trajectory-mode badge on the same row as the label, plus per-category share bars. */
-function ModeSection({ stats, t }: { stats: NonNullable<TrajectoryStats>; t: ModelTesterPanelProps['t'] }) {
-  return (
-    <section className={css.section}>
-      <div className={css.modeRow}>
-        <h3 className={css.modeLabel}>{t('panel.modeLabel')}</h3>
-        <span className={css.modeBadge} data-mode={stats.mode} style={{ color: MODE_TEXT[stats.mode] }}>
-          {t(`mode.${stats.mode}`)}
-        </span>
-      </div>
-      {GROUPS.map(group => (
-        <div className={css.barRow} key={group}>
-          <span className={css.barLabel}>{t(`group.${group}`)}</span>
-          <span className={css.barTrack}>
-            <span
-              className={css.barFill}
-              style={{ width: `${Math.round(stats.shares[group] * 100)}%`, background: GROUP_ACCENT[group] }}
-            />
-          </span>
-          <span className={css.barValue}>{stats.groups[group]}</span>
-        </div>
-      ))}
-    </section>
-  )
-}
-
-/** Keyword breakdown: nonzero patterns grouped by category, plus raw word metrics. */
-function PatternSection({ stats, t }: { stats: NonNullable<TrajectoryStats>; t: ModelTesterPanelProps['t'] }) {
-  const rows = useMemo(() => stats.patterns
-    .map((count, index) => ({ pattern: PATTERNS[index], count, index }))
-    .filter(row => row.count > 0)
-    .sort((a, b) => {
-      const ga = GROUPS.indexOf(a.pattern.group)
-      const gb = GROUPS.indexOf(b.pattern.group)
-      return ga !== gb ? ga - gb : b.count - a.count
-    }), [stats])
-
-  return (
-    <section className={css.section}>
-      <h3 className={css.sectionLabel}>{t('panel.patternsLabel')}</h3>
-      <div className={css.metrics}>
-        <span className={css.metric}>
-          we <b className={css.metricValue}>{stats.words.we}</b>
-        </span>
-        <span className={css.metric}>
-          let&rsquo;s <b className={css.metricValue}>{stats.words.lets}</b>
-        </span>
-        <span className={css.metric}>
-          let me <b className={css.metricValue}>{stats.words.letMe}</b>
-        </span>
-        <span className={css.metric}>
-          I <b className={css.metricValue}>{stats.words.firstPerson}</b>
-        </span>
-      </div>
-      {rows.length === 0 ? (
-        <p className={css.empty}>{t('panel.noKeywords')}</p>
-      ) : (
-        <div className={css.patternList}>
-          {rows.map(row => (
-            <span
-              key={row.index}
-              className={css.patternItem}
-              title={row.pattern.note}
-            >
-              <span
-                className={css.patternDot}
-                style={{ background: GROUP_ACCENT[row.pattern.group] }}
-                aria-hidden="true"
-              />
-              <span className={css.patternKey}>{t(row.pattern.label)}</span>
-              <span className={css.patternCount}>{row.count}</span>
-            </span>
-          ))}
-        </div>
-      )}
-    </section>
-  )
-}
-
-/** Footer: hesitation-pressure health note. */
-function Footer({ stats, t }: { stats: NonNullable<TrajectoryStats>; t: ModelTesterPanelProps['t'] }) {
-  const health: 'low' | 'mid' | 'high' = stats.hesitation === 0
-    ? 'low'
-    : stats.hesitation < 0.5 && stats.words.letMe <= 5
-      ? 'mid'
-      : 'high'
-  return (
-    <footer className={css.footer}>
-      <div className={css.healthRow}>
-        {t('panel.healthLabel')}
-        <b className={css.healthValue} data-health={health}>{t(`panel.health.${health}`)}</b>
-      </div>
-    </footer>
-  )
-}
-
-export type { Mode }

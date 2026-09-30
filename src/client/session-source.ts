@@ -27,6 +27,7 @@
 import type { HostObservable } from '@deepseek-ai/dsh-client-ui-slots'
 import {
   conversationViewOf,
+  resolveCurrentSessionId,
   sessionCarriesNodes,
   type ConversationPort,
   type ConversationView,
@@ -125,7 +126,7 @@ export function createLiveConversation(
     stopRetry()
     trackedId = undefined
     trackedSession = undefined
-    const id = sessions.list.getSnapshot().current
+    const id = resolveCurrentSessionId(sessions)
     if (id === undefined) {
       snapshot = undefined
       notify() // consumers must repaint to the no-session state immediately
