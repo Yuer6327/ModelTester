@@ -181,11 +181,83 @@ function sendProbeOf(ctx: ClientContext): ModelTesterActions['sendProbe'] {
 }
 
 /**
+ * Per-session usage reading from the 0.2.0 session projections.
+ *
+ * `sessions.list.getSnapshot().projectionsBySession` carries a live
+ * `tokenUsage` projection per session — served by the host for every session,
+ * **including background ones** (unlike the conversation assembly, which only
+ * materializes for the main view). This is the collection path that lets the
+ * fertility runner measure probes without bringing each session to the front.
+ * @param sessions - feature-detected sessions port.
+ * @param id - session to read.
+ * @returns prompt-side (total − output) and output token counts, or null when
+ * the projection has not reported yet.
+ */
+function projectionUsageOf(
+  sessions: ProbeSessionsPort,
+  id: string,
+): { promptTokens: number; outputTokens: number } | null {
+  const list = (sessions as { list?: { getSnapshot?: () => unknown } }).list
+  const snap = list?.getSnapshot?.() as
+    | { projectionsBySession?: Map<string, unknown> | Record<string, unknown> }
+    | undefined
+  const proj = snap?.projectionsBySession
+  if (!proj) return null
+  const entry = proj instanceof Map ? proj.get(id) : (proj as Record<string, unknown>)[id]
+  const values = (entry as { values?: unknown } | undefined)?.values
+  if (!values) return null
+  const tu = (values instanceof Map ? values.get('tokenUsage') : (values as Record<string, unknown>)['tokenUsage']) as
+    | { uncachedInputTokens?: number; cacheReadTokens?: number; cacheWriteTokens?: number; outputTokens?: number }
+    | undefined
+  if (!tu || typeof tu !== 'object') return null
+  const promptTokens = (tu.uncachedInputTokens ?? 0) + (tu.cacheReadTokens ?? 0) + (tu.cacheWriteTokens ?? 0)
+  const outputTokens = tu.outputTokens ?? 0
+  if (!Number.isSafeInteger(promptTokens) || !Number.isSafeInteger(outputTokens)) return null
+  return { promptTokens, outputTokens }
+}
+
+/**
+ * Wait for a background probe reply using the projections channel: output
+ * tokens start growing, then hold steady across three consecutive polls —
+ * the stable reading carries the turn's prompt-side count.
+ */
+async function waitForProjectionTurn(
+  read: () => { promptTokens: number; outputTokens: number } | null,
+  probeId: string,
+): Promise<BatchTurnResult> {
+  const deadline = Date.now() + TURN_TIMEOUT_MS
+  let lastOutput = -1
+  let stable = 0
+  let sawData = false
+  let last: { promptTokens: number; outputTokens: number } | null = null
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS))
+    last = read()
+    if (last === null) continue
+    sawData = true
+    if (last.outputTokens > 0 && last.outputTokens === lastOutput) {
+      stable += 1
+      if (stable >= 3) return { probeId, status: 'answered', text: '', ...last }
+    } else {
+      stable = 0
+    }
+    lastOutput = last.outputTokens
+  }
+  if (!sawData) return { probeId, status: 'timeout', text: '' }
+  return { probeId, status: 'timeout', text: '', ...(last ?? {}) }
+}
+
+/**
  * Fertility runner: each item gets its OWN fresh session. Per-turn
  * prompt-side usage (totalTokens − outputTokens) is then the gateway wrapper
  * plus that item's text under the serving tokenizer — differencing across
  * items cancels the wrapper without any history accumulation the host's
  * context management would distort.
+ *
+ * Collection is dual-path: on 0.2.0 the usage readings come from the host's
+ * per-session projections, which serve background sessions — the panel never
+ * needs to bring a probe session to the front. On 0.1.x hosts the readings
+ * come from the conversation snapshot of the foreground session instead.
  */
 function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['runFertility']> {
   return async (items, onProgress) => {
@@ -215,12 +287,19 @@ function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['run
           continue
         }
         report('waiting')
-        const poll = pollOf(ctx, id, sessions)
-        if (poll === null) {
-          release?.()
-          return { ok: false, error: 'unavailable' }
+        let turn: BatchTurnResult
+        if (projectionUsageOf(sessions, id) !== null) {
+          // 0.2.0 projections path — readings serve background sessions.
+          turn = await waitForProjectionTurn(() => projectionUsageOf(sessions, id), item.id)
+        } else {
+          // 0.1.x foreground path — conversation snapshot of the open session.
+          const poll = pollOf(ctx, id, sessions)
+          if (poll === null) {
+            release?.()
+            return { ok: false, error: 'unavailable' }
+          }
+          turn = await waitForTurn(poll, 0, item.id)
         }
-        const turn = await waitForTurn(poll, 0, item.id)
         release?.()
         turns.push(turn)
         report(turn.status)
