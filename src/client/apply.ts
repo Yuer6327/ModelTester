@@ -92,6 +92,62 @@ export function apply(ctx: ClientContext): void {
 }
 
 /**
+ * Feature-detected session face used by the probe actions, across host
+ * shapes: 0.1.x (`create()` → id, `open(id)`) and 0.2.0 (`create(request)` →
+ * `{ sessionId }`, `open` replaced by the retain/ready reference mechanism).
+ */
+interface ProbeSessionsPort {
+  create?: (request?: unknown) => Promise<unknown>
+  open?: (id: string) => void
+  retain?: (id: string, options: { source: string }) => {
+    binding: { session?: unknown }
+    ready: Promise<unknown>
+    release(): void
+  }
+  using?: (
+    id: string,
+    options: { source: string },
+    operation: (reference: { binding: { session?: unknown } }) => Promise<unknown>,
+  ) => Promise<unknown>
+  binding?: (id: string) => { session?: { prompt?: unknown; getSnapshot?: () => unknown } } | undefined
+}
+
+/**
+ * Create one fresh session and bring it to the open state across host shapes.
+ *
+ * 0.1.x: `create()` returns the id and `open(id)` opens it. 0.2.0: `create()`
+ * returns `{ sessionId }` and `open` is gone — the session opens through the
+ * retain/ready reference mechanism instead, so the caller must keep the
+ * returned reference alive until the prompt (and any reply polling) settles
+ * and then call `release()`; releasing starts local scope teardown.
+ * @param sessions - feature-detected sessions port.
+ * @returns the open session id, its prompt face, and a release thunk (0.2.0
+ * only), or undefined when the host lacks the face entirely.
+ */
+async function createOpenedSession(
+  sessions: ProbeSessionsPort,
+): Promise<{ id: string; session?: { prompt?: unknown }; release?: () => void } | undefined> {
+  if (typeof sessions.create !== 'function') return undefined
+  const created = (await sessions.create({})) as { sessionId?: string } | string | undefined
+  const id = typeof created === 'string' ? created : (created?.sessionId ?? undefined)
+  if (id === undefined) return undefined
+  trackTestSession(id)
+  if (typeof sessions.open === 'function') {
+    sessions.open(id)
+    const session = sessions.binding?.(id)?.session
+    return { id, session }
+  }
+  if (typeof sessions.retain !== 'function') return undefined
+  const reference = sessions.retain(id, { source: 'gateway' })
+  await reference.ready
+  const bound = (sessions.binding?.(id) ?? (reference.binding as { session?: { prompt?: unknown } } | undefined)) as
+    | { session?: { prompt?: unknown } }
+    | undefined
+  const session = bound?.session
+  return { id, session, release: () => reference.release() }
+}
+
+/**
  * Probe-send over the host sessions face: `create()` a fresh session, `open()`
  * it as current, then `prompt()` the probe text through the session face — the
  * same client contract the web app's own input uses. Every member is
@@ -100,30 +156,23 @@ export function apply(ctx: ClientContext): void {
 function sendProbeOf(ctx: ClientContext): ModelTesterActions['sendProbe'] {
   return async (text) => {
     try {
-      const sessions = ctx.sessions as unknown as {
-        create?: () => Promise<string>
-        open?: (id: string) => void
-        binding?: (id: string) => {
-          session?: {
-            prompt?: (parts: readonly { type: 'text'; text: string }[], mode: 'queue' | 'steer') =>
-              Promise<{ ok?: boolean; error?: { message?: string } }>
-          }
-        }
-      }
-      if (typeof sessions.create !== 'function' || typeof sessions.open !== 'function') {
+      const opened = await createOpenedSession(ctx.sessions as ProbeSessionsPort)
+      if (opened === undefined) return { ok: false, error: 'unavailable' }
+      const { id, session, release } = opened
+      const prompt = (session as { prompt?: unknown } | undefined)?.prompt
+      if (typeof prompt !== 'function') {
+        release?.()
         return { ok: false, error: 'unavailable' }
       }
-      const id = await sessions.create()
-      trackTestSession(id)
-      sessions.open(id)
-      const session = sessions.binding?.(id)?.session
-      const prompt = (session as { prompt?: unknown } | undefined)?.prompt
-      if (typeof prompt !== 'function') return { ok: false, error: 'unavailable' }
       const result = await (prompt as (parts: readonly { type: 'text'; text: string }[], mode: 'queue' | 'steer') =>
         Promise<{ ok?: boolean; error?: { message?: string } }>).call(session, [{ type: 'text', text }], 'queue')
       if (result !== undefined && result !== null && result.ok === false) {
+        release?.()
         return { ok: false, error: result.error?.message ?? 'rejected' }
       }
+      // Keep the retained reference alive briefly so the accepted turn can
+      // stream back into the live statistics before scope teardown.
+      setTimeout(() => release?.(), 30_000)
       return { ok: true }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -141,34 +190,38 @@ function sendProbeOf(ctx: ClientContext): ModelTesterActions['sendProbe'] {
 function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['runFertility']> {
   return async (items, onProgress) => {
     try {
-      const sessions = ctx.sessions as unknown as BatchSessionsPort
-      if (typeof sessions.create !== 'function' || typeof sessions.open !== 'function') {
-        return { ok: false, error: 'unavailable' }
-      }
+      const sessions = ctx.sessions as unknown as ProbeSessionsPort
       const turns: BatchTurnResult[] = []
       for (let index = 0; index < items.length; index++) {
         const item = items[index]!
         const report = (status: BatchProgress['status']): void =>
           onProgress?.({ index, total: items.length, probeId: item.id, status })
         report('sending')
-        const id = await sessions.create()
-        trackTestSession(id)
-        sessions.open(id)
-        const session = sessions.binding?.(id)?.session
+        const opened = await createOpenedSession(sessions)
+        if (opened === undefined) return { ok: false, error: 'unavailable' }
+        const { id, session, release } = opened
         const prompt = (session as { prompt?: unknown } | undefined)?.prompt
-        if (typeof prompt !== 'function') return { ok: false, error: 'unavailable' }
+        if (typeof prompt !== 'function') {
+          release?.()
+          return { ok: false, error: 'unavailable' }
+        }
         const send = (prompt as (parts: readonly { type: 'text'; text: string }[], mode: 'queue' | 'steer') =>
           Promise<{ ok?: boolean; error?: { message?: string } }>).bind(session)
         const result = await send([{ type: 'text', text: item.text }], 'queue')
         if (result !== undefined && result !== null && result.ok === false) {
+          release?.()
           turns.push({ probeId: item.id, status: 'failed', text: '' })
           report('failed')
           continue
         }
         report('waiting')
         const poll = pollOf(ctx, id, sessions)
-        if (poll === null) return { ok: false, error: 'unavailable' }
+        if (poll === null) {
+          release?.()
+          return { ok: false, error: 'unavailable' }
+        }
         const turn = await waitForTurn(poll, 0, item.id)
+        release?.()
         turns.push(turn)
         report(turn.status)
       }
@@ -224,28 +277,20 @@ function cleanupTestSessionsOf(ctx: ClientContext): NonNullable<ModelTesterActio
 function runBatchOf(ctx: ClientContext): NonNullable<ModelTesterActions['runBatch']> {
   return async (items, onProgress) => {
     try {
-      const sessions = ctx.sessions as unknown as {
-        create?: () => Promise<string>
-        open?: (id: string) => void
-        binding?: (id: string) => {
-          session?: {
-            prompt?: (parts: readonly { type: 'text'; text: string }[], mode: 'queue' | 'steer') =>
-              Promise<{ ok?: boolean; error?: { message?: string } }>
-            getSnapshot?: () => unknown
-          }
-        }
-      }
-      if (typeof sessions.create !== 'function' || typeof sessions.open !== 'function') {
+      const sessions = ctx.sessions as unknown as ProbeSessionsPort
+      const opened = await createOpenedSession(sessions)
+      if (opened === undefined) return { ok: false, error: 'unavailable' }
+      const { id, session, release } = opened
+      const prompt = (session as { prompt?: unknown } | undefined)?.prompt
+      if (typeof prompt !== 'function') {
+        release?.()
         return { ok: false, error: 'unavailable' }
       }
-      const id = await sessions.create()
-      trackTestSession(id)
-      sessions.open(id)
-      const session = sessions.binding?.(id)?.session
-      const prompt = (session as { prompt?: unknown } | undefined)?.prompt
-      if (typeof prompt !== 'function') return { ok: false, error: 'unavailable' }
       const poll = pollOf(ctx, id, sessions)
-      if (poll === null) return { ok: false, error: 'unavailable' }
+      if (poll === null) {
+        release?.()
+        return { ok: false, error: 'unavailable' }
+      }
 
       const send = (prompt as (parts: readonly { type: 'text'; text: string }[], mode: 'queue' | 'steer') =>
         Promise<{ ok?: boolean; error?: { message?: string } }>).bind(session)
@@ -267,6 +312,7 @@ function runBatchOf(ctx: ClientContext): NonNullable<ModelTesterActions['runBatc
         turns.push(turn)
         report(turn.status)
       }
+      release?.()
       return { ok: true, turns }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -283,23 +329,10 @@ const TURN_TIMEOUT_MS = 150_000
  * (`uiConversation.binding(id)`), falls back to the session snapshot (rc.7–
  * 0.1.1 carry nodes on SessionFace). Returns null when neither is pollable.
  */
-/** Host sessions face subset used by the batch runner (all feature-detected). */
-interface BatchSessionsPort {
-  create?: () => Promise<string>
-  open?: (id: string) => void
-  binding?: (id: string) => {
-    session?: {
-      prompt?: (parts: readonly { type: 'text'; text: string }[], mode: 'queue' | 'steer') =>
-        Promise<{ ok?: boolean; error?: { message?: string } }>
-      getSnapshot?: () => unknown
-    }
-  }
-}
-
 function pollOf(
   ctx: ClientContext,
   id: string,
-  sessions: BatchSessionsPort,
+  sessions: ProbeSessionsPort,
 ): (() => ConversationView | undefined) | null {
   const ui = ctx.get('uiConversation') as { binding?: (sessionId: string) => ConversationPort } | undefined
   const conversation = ui !== undefined && typeof ui.binding === 'function' ? ui.binding(id) : undefined
