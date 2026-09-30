@@ -41,12 +41,14 @@ jobs:
 
       # 幂等发布：版本已在 npm 上时跳过（不重发、不假红）。
       # 非 release 提交（文档/工具）不被迫 bump 版本；真正的新版本照常自动发布。
+      # --prefer-online: packument 的 CDN 缓存会滞后数分钟至小时级，缓存的
+      # 旧文档会把「刚发布」误判为「未发布」，导致 publish 409 假红。
       - name: Check version on npm
         id: published
         run: |
           NAME=$(node -p "require('./package.json').name")
           VERSION=$(node -p "require('./package.json').version")
-          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+          if npm view "$NAME@$VERSION" version --prefer-online >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "$NAME@$VERSION is already on npm, publish will be skipped"
           else
@@ -72,4 +74,6 @@ jobs:
         if: steps.npm_token.outputs.has == 'true' && steps.published.outputs.exists != 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: pnpm publish --no-git-checks
+        # 409（版本已被 staged/发布——与手动 publish 或并发 run 竞争）视为幂等
+        # 成功而非失败：版本已在 npm 上，目标已达成。
+        run: pnpm publish --no-git-checks || if [ "$?" = "1" ] && npm view "$npm_package_name@$npm_package_version" version >/dev/null 2>&1; then echo "already published (409) — treated as success"; else exit 1; fi

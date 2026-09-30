@@ -37,7 +37,9 @@
 ## 硬性边界
 
 - 探针不过绝不声明 compatible；失败关闭；绝不 force push；绝不写入或修改真实 `~/.dsh`；与任务无关的未提交改动一律不碰。
-- `npm publish` 属对外发布且需要凭证：发现 npm 上的 `dsh-modeltester` 版本落后于仓库版本时，只报告提醒用户发布，不自动执行。
+- **npm 发布由仓库 CI 自动执行**（`.github/workflows/publish.yml`：push 到 main → 门禁 → 版本未在 npm 上则 `pnpm publish`）。**本地绝不要手动 `npm publish`**：本地 publish 会先占 staged 槽位，CI 随后同版本发布 E409 假红，且 staged 版本经 npm CDN 缓存延迟数分钟至小时级才可见（易被误判「发布失败」）。维护流程的发布动作 = bump 版本号 + push，其余交给 CI。
+- 发布状态核查必须**绕过 CDN 缓存**直读后端：`curl --noproxy "*" https://registry.npmjs.org/<pkg>`（npm view/curl 走 CDN 的 packument 缓存会滞后数分钟至小时级，把「已发布」误判为「404 未发布」）。
+- `npm publish` 属对外发布且需要凭证：发现 npm 上的版本落后于仓库版本时，只报告提醒（正常情况下 CI 会在下一次 push 自动补发），不自动执行。
 - 不要在 DSH-Store 的任何 issue 下回复、确认或关闭；商城状态全自动流转。
 
 ## 当前基线（2026-09-29，跨系列跟进 0.2.0 时更新）
