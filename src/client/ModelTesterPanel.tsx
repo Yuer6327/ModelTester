@@ -212,14 +212,29 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
   const [fertStatus, setFertStatus] = useState<Record<string, BatchProgress['status']>>({})
   const [fertStored, setFertStored] = useState<StoredFertility | null>(loadStoredFertility)
   const [fertError, setFertError] = useState('')
+  const [fertInterrupted, setFertInterrupted] = useState<{ startedAt: string; done: number; total: number } | null>(null)
 
-  /** Fertility run: one fresh session per text, scored by usage deltas. */
+  // Detect an interrupted fertility run once on mount (crash / host restart).
+  useEffect(() => {
+    const found = actions?.interruptedFertility?.() ?? null
+    if (found !== null) setFertInterrupted({ startedAt: found.startedAt, done: found.items.filter(i => i.status !== 'pending').length, total: found.total })
+  }, [actions])
+
+  /** Fertility run: one fresh session per text, scored by usage deltas.
+   *  Resumes an interrupted run automatically (persisted readings reused). */
   const runFertility = async (): Promise<void> => {
     if (fertRunning || actions?.runFertility === undefined) return
     setFertRunning(true)
     setFertStored(null)
     setFertError('')
-    setFertStatus({})
+    const interrupted = actions?.interruptedFertility?.()
+    const prefill: Record<string, BatchProgress['status']> = {}
+    if (interrupted !== null && interrupted !== undefined) {
+      for (const it of interrupted.items) {
+        if (it.status !== 'pending') prefill[it.id] = it.status
+      }
+    }
+    setFertStatus(prefill)
     const items = fertilitySequence()
     try {
       const response = await actions.runFertility(items, progress0 => {
@@ -383,6 +398,7 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
             status: fertStatus,
             stored: fertStored,
             error: fertError,
+            interrupted: fertInterrupted,
             run: () => { void runFertility() },
           }}
           batch={{
@@ -410,6 +426,8 @@ interface FertState {
   status: Record<string, BatchProgress['status']>
   stored: StoredFertility | null
   error: string
+  /** Interrupted run detected at mount — resumable via run(). */
+  interrupted: { startedAt: string; done: number; total: number } | null
   run: () => void
 }
 
@@ -759,15 +777,26 @@ function ProbesSection({ t, actions, fert, batch, cleanup }: {
       </div>
       {(canBatch || canFertility) && (
         <div className={css.batchBar}>
+          {fert.interrupted !== null && !fert.running && (
+            <span className={css.attrBadge}>
+              {t('attr.fertility.interrupted')
+                .replace('{done}', String(fert.interrupted.done))
+                .replace('{total}', String(fert.interrupted.total))}
+            </span>
+          )}
           <span className={css.batchTokens}>≈{formatCount(batteryTokens)} tok</span>
           <button
             type="button"
             className={css.probeBtn}
             disabled={fert.running || !canFertility}
-            title={t('attr.fertility.note')}
+            title={fert.interrupted !== null ? t('attr.fertility.resumeNote') : t('attr.fertility.note')}
             onClick={fert.run}
           >
-            {fert.running ? t('attr.batch.running') : t('attr.fertility.run')}
+            {fert.running
+              ? t('attr.batch.running')
+              : fert.interrupted !== null
+                ? t('attr.fertility.resume')
+                : t('attr.fertility.run')}
           </button>
           <button
             type="button"

@@ -5,6 +5,9 @@ export const NS = 'modeltester'
 /** Simplified-Chinese UI messages. */
 export const zh = {
   'panel.title': 'ModelTester · 模型检测',
+  'attr.fertility.interrupted': '上次测试中断（完成 {done}/{total}），可继续',
+  'attr.fertility.resume': '继续测试',
+  'attr.fertility.resumeNote': '复用已完成的探针读数，只补跑剩余项（会话已保留）',
   'panel.aria': 'ModelTester 模型检测面板',
   'panel.collapse': '收起',
   'panel.expand': '展开',
@@ -165,6 +168,9 @@ export const zh = {
 /** English UI messages. */
 export const en = {
   'panel.title': 'ModelTester · Model Detection',
+  'attr.fertility.interrupted': 'Last run interrupted ({done}/{total} finished) — resumable',
+  'attr.fertility.resume': 'Resume run',
+  'attr.fertility.resumeNote': 'Reuses finished probe readings; only the missing probes run (sessions kept)',
   'panel.aria': 'ModelTester model detection panel',
   'panel.collapse': 'Collapse',
   'panel.expand': 'Expand',

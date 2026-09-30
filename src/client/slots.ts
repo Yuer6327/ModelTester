@@ -63,6 +63,22 @@ export interface ModelTesterActions {
     onProgress?: (progress: BatchProgress) => void,
   ): Promise<{ ok: boolean; error?: string; turns?: readonly BatchTurnResult[] }>
   /**
+   * Query an interrupted fertility run (crash / host restart mid-run), if any.
+   * The panel offers to resume; calling `runFertility` with the same probe
+   * sequence automatically reuses the persisted readings and pre-created
+   * sessions. Optional.
+   */
+  interruptedFertility?(): {
+    startedAt: string
+    total: number
+    items: readonly {
+      id: string
+      status: 'answered' | 'timeout' | 'failed' | 'pending'
+      promptTokens: number | null
+      sessionId: string | null
+    }[]
+  } | null
+  /**
    * Bulk-remove sessions the plugin itself created during test runs.
    * Feature-detected: the 0.1.7 host sessions face has no delete RPC, so this
    * reports `unavailable` until a host ships one. Optional.

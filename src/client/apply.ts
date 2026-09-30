@@ -85,6 +85,7 @@ export function apply(ctx: ClientContext): void {
       sendProbe: sendProbeOf(ctx),
       runBatch: runBatchOf(ctx),
       runFertility: runFertilityOf(ctx),
+      interruptedFertility: interruptedFertilityOf(ctx),
       cleanupTestSessions: cleanupTestSessionsOf(ctx),
     },
     }),
@@ -247,6 +248,77 @@ async function waitForProjectionTurn(
   return { probeId, status: 'timeout', text: '', ...(last ?? {}) }
 }
 
+// ---------------------------------------------------------------------------
+// Fertility run-state persistence — a run survives host restarts.
+//
+// Every state transition is written to localStorage immediately: pre-created
+// session ids, per-probe readings. After a crash the panel offers to resume,
+// completed readings are reused verbatim, and only the missing probes run.
+// ---------------------------------------------------------------------------
+
+interface FertRunState {
+  startedAt: string
+  probeIds: readonly string[]
+  /** probeId → pre-created/created session id (survives restarts: the host keeps sessions). */
+  sessionIds: Record<string, string>
+  /** Completed probe readings, reused verbatim on resume. */
+  done: readonly { probeId: string; status: 'answered' | 'timeout' | 'failed'; promptTokens: number | null; outputTokens: number | null; sessionId: string }[]
+}
+
+const FERT_RUN_KEY = 'dsh-modeltester.fert-run.v1'
+
+function readFertRunState(storage: Storage | undefined): FertRunState | null {
+  if (storage === undefined) return null
+  try {
+    const raw = storage.getItem(FERT_RUN_KEY)
+    if (raw === null) return null
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null) return null
+    const r = parsed as Partial<FertRunState>
+    if (!Array.isArray(r.probeIds) || typeof r.sessionIds !== 'object' || r.sessionIds === null || !Array.isArray(r.done)) return null
+    return r as FertRunState
+  } catch {
+    return null
+  }
+}
+
+function writeFertRunState(storage: Storage | undefined, state: FertRunState): void {
+  if (storage === undefined) return
+  try {
+    storage.setItem(FERT_RUN_KEY, JSON.stringify(state))
+  } catch {
+    /* private mode / quota: non-fatal */
+  }
+}
+
+function clearFertRunState(storage: Storage | undefined): void {
+  if (storage === undefined) return
+  try {
+    storage.removeItem(FERT_RUN_KEY)
+  } catch {
+    /* non-fatal */
+  }
+}
+
+/** Face for the interrupted-run query exposed to the panel. */
+function interruptedFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['interruptedFertility']> {
+  return () => {
+    const state = readFertRunState(typeof window === 'undefined' ? undefined : window.localStorage)
+    if (state === null) return null
+    const doneMap = new Map(state.done.map(d => [d.probeId, d]))
+    const items = state.probeIds.map(id => {
+      const d = doneMap.get(id)
+      return {
+        id,
+        status: (d?.status ?? 'pending') as 'answered' | 'timeout' | 'failed' | 'pending',
+        promptTokens: d?.promptTokens ?? null,
+        sessionId: state.sessionIds[id] ?? null,
+      }
+    })
+    return { startedAt: state.startedAt, total: state.probeIds.length, items }
+  }
+}
+
 /**
  * Fertility runner: each item gets its OWN fresh session. Per-turn
  * prompt-side usage (totalTokens − outputTokens) is then the gateway wrapper
@@ -256,22 +328,84 @@ async function waitForProjectionTurn(
  *
  * Collection is dual-path: on 0.2.0 the usage readings come from the host's
  * per-session projections, which serve background sessions — the panel never
- * needs to bring a probe session to the front. On 0.1.x hosts the readings
- * come from the conversation snapshot of the foreground session instead.
+ * needs to bring a probe session to the front, and switching sessions or
+ * models mid-run does not affect already-created probe sessions (all probe
+ * sessions are pre-created up front, locking the serving model at start).
+ *
+ * Crash-safe: the run state (pre-created session ids + completed readings)
+ * is persisted after every step. If the host process dies mid-run, the panel
+ * offers to resume on restart — finished readings are reused verbatim and
+ * only the missing probes run.
  */
 function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['runFertility']> {
   return async (items, onProgress) => {
+    const storage = typeof window === 'undefined' ? undefined : window.localStorage
     try {
       const sessions = ctx.sessions as unknown as ProbeSessionsPort
       const turns: BatchTurnResult[] = []
+
+      // --- Resume detection: same probe sequence → continue an interrupted run.
+      const prev = readFertRunState(storage)
+      const resume = prev !== null
+        && prev.probeIds.length === items.length
+        && items.every((item, i) => prev.probeIds[i] === item.id)
+      const doneMap = new Map<string, FertRunState['done'][number]>()
+      const sessionIds: Record<string, string> = {}
+      if (resume && prev !== null) {
+        for (const d of prev.done) doneMap.set(d.probeId, d)
+        Object.assign(sessionIds, prev.sessionIds)
+      }
+
+      const state = (): FertRunState => ({
+        startedAt: prev?.startedAt ?? new Date().toISOString(),
+        probeIds: items.map(item => item.id),
+        sessionIds,
+        done: [...doneMap.values()],
+      })
+
+      // --- Phase 1: pre-create (or re-retain) every probe session up front.
+      //      All sessions inherit the same default model at creation time, so
+      //      a mid-run model switch cannot mix fingerprints. Created ids are
+      //      persisted one by one: a crash right after this loop still leaves
+      //      every session recoverable through sessions.retain().
+      const opened: { id: string; session?: { prompt?: unknown }; release?: () => void }[] = []
+      for (let index = 0; index < items.length; index++) {
+        const item = items[index]!
+        onProgress?.({ index, total: items.length, probeId: item.id, status: 'sending' })
+        const existingId = sessionIds[item.id]
+        if (existingId !== undefined && typeof sessions.retain === 'function') {
+          // Resume path: the session survived the restart on the host — re-activate.
+          const reference = sessions.retain(existingId, { source: 'gateway' })
+          await reference.ready
+          const bound = (sessions.binding?.(existingId) ?? (reference.binding as { session?: { prompt?: unknown } } | undefined)) as
+            | { session?: { prompt?: unknown } }
+            | undefined
+          const session = bound?.session
+          opened[index] = { id: existingId, session, release: () => reference.release() }
+          continue
+        }
+        const created = await createOpenedSession(sessions)
+        if (created === undefined) return { ok: false, error: 'unavailable' }
+        sessionIds[item.id] = created.id
+        opened[index] = created
+        writeFertRunState(storage, state())
+      }
+      if (prev === null || !resume) writeFertRunState(storage, state())
+
+      // --- Phase 2: send each probe and collect through the projections path.
       for (let index = 0; index < items.length; index++) {
         const item = items[index]!
         const report = (status: BatchProgress['status']): void =>
           onProgress?.({ index, total: items.length, probeId: item.id, status })
+        const finished = doneMap.get(item.id)
+        if (finished !== undefined) {
+          // Resume: reuse the persisted reading verbatim.
+          turns.push({ probeId: item.id, status: finished.status, text: '', promptTokens: finished.promptTokens ?? undefined, outputTokens: finished.outputTokens ?? undefined })
+          report(finished.status)
+          continue
+        }
         report('sending')
-        const opened = await createOpenedSession(sessions)
-        if (opened === undefined) return { ok: false, error: 'unavailable' }
-        const { id, session, release } = opened
+        const { id, session, release } = opened[index]!
         const prompt = (session as { prompt?: unknown } | undefined)?.prompt
         if (typeof prompt !== 'function') {
           release?.()
@@ -282,7 +416,10 @@ function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['run
         const result = await send([{ type: 'text', text: item.text }], 'queue')
         if (result !== undefined && result !== null && result.ok === false) {
           release?.()
-          turns.push({ probeId: item.id, status: 'failed', text: '' })
+          const failedTurn = { probeId: item.id, status: 'failed' as const, text: '', sessionId: id }
+          doneMap.set(item.id, { ...failedTurn, promptTokens: null, outputTokens: null })
+          writeFertRunState(storage, state())
+          turns.push(failedTurn)
           report('failed')
           continue
         }
@@ -300,10 +437,15 @@ function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['run
           }
           turn = await waitForTurn(poll, 0, item.id)
         }
+        // Persist the reading BEFORE releasing: a crash after this line still
+        // keeps the measurement, and the release only starts local teardown.
+        doneMap.set(item.id, { probeId: item.id, status: turn.status, promptTokens: turn.promptTokens ?? null, outputTokens: turn.outputTokens ?? null, sessionId: id })
+        writeFertRunState(storage, state())
         release?.()
         turns.push(turn)
         report(turn.status)
       }
+      clearFertRunState(storage)
       return { ok: true, turns }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
