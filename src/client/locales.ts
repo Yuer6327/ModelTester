@@ -163,6 +163,10 @@ export const zh = {
   'attr.fertility.progress': 'usage 指纹进度',
   'attr.fertility.wrapper': '网关包装常量（基线轮 prompt 侧）：',
   'attr.fertility.measuredAt': '测量于',
+  'attr.fertility.corrected': '漂移校正匹配',
+  'attr.fertility.inliers': '一致维度',
+  'attr.fertility.drift': '检测到 wrapper 漂移（各会话注入相差最多 {spread} tok）：{inliers}/{measured} 维落在同一基准组，其余已降权参与排名',
+  'attr.fertility.inconclusive': '无法判定：漂移过大或参照家族未收录 — 下方排序仅为审计信息，不构成身份结论',
 } as const
 
 /** English UI messages. */
@@ -326,6 +330,10 @@ export const en = {
   'attr.fertility.progress': 'usage fingerprint progress',
   'attr.fertility.wrapper': 'Gateway wrapper constant (baseline-turn prompt side):',
   'attr.fertility.measuredAt': 'measured',
+  'attr.fertility.corrected': 'drift-corrected match',
+  'attr.fertility.inliers': 'consensus dims',
+  'attr.fertility.drift': 'Wrapper drift detected (per-session injections differ by up to {spread} tok): {inliers}/{measured} dims share one baseline, the rest downweighted',
+  'attr.fertility.inconclusive': 'Inconclusive: drift too large or family missing from the reference table — the ranking below is audit-only, not an identity claim',
 } as const
 
 /** Key union of the ModelTester dictionary. */

@@ -25,7 +25,7 @@ import { ALL_SIGNALS, type Vendor } from './attribution-signals.ts'
 import { loadStoredBatch, loadStoredFertility, saveStoredBatch, saveStoredFertility, type StoredBatch, type StoredFertility } from './panel-persist.ts'
 import { aggregateBatch, batchScanText, estimateTokens, familyHitsOf, identityClaimsOf, orderedProbes, type BatchGuess } from './batch.ts'
 import { FERTILITY_VERSION, FERTILITY_FAMILIES, FERTILITY_TEXTS } from './fertility.ts'
-import { fertilitySequence, fertilityVerdictOf } from './fertility-score.ts'
+import { fertilitySequence, fertilityVerdictOf, INLIER_L1_MAX, INLIER_MIN } from './fertility-score.ts'
 import { PROBES, type ProbeEntry } from './probes.ts'
 import { loadTestSessions, clearTestSessions } from './panel-persist.ts'
 import type { HistoryState } from './session-store.ts'
@@ -909,18 +909,26 @@ function ProbeRow({ probe, t, actions, canBatch, status }: {
   )
 }
 
-/** The fertility verdict: usage-delta fingerprint vs official tokenizers. */
+/** The fertility verdict: usage-delta fingerprint vs official tokenizers.
+ *  Three honesty tiers: exact (clean run, L1 0), drift-corrected (wrapper
+ *  drifted — majority residual cluster still identifies a family), and
+ *  inconclusive (no call made; the ranking is shown as audit only). */
 function FertilityCard({ stored, t }: {
   stored: StoredFertility
   t: ModelTesterPanelProps['t']
 }) {
   const verdict = stored.verdict
   const top = verdict.candidates[0]
-  const exact = top !== undefined && top.l1 === 0 && verdict.measured === 9
-  const tie = verdict.candidates[1] !== undefined && verdict.candidates[1].l1 === top.l1
-  const tied = tie ? verdict.candidates.filter(candidate => candidate.l1 === top.l1) : [top]
+  const drift = verdict.drift === true
+  const spread = verdict.wrapperSpread ?? null
+  const keyOf = (candidate: (typeof verdict.candidates)[number]): string =>
+    `${candidate.inliers}|${candidate.inlierL1}|${candidate.l1}`
+  const exact = top !== undefined && top.l1 === 0 && verdict.measured === 9 && !drift
+  const tied = top !== undefined ? verdict.candidates.filter(candidate => keyOf(candidate) === keyOf(top)) : []
+  const corrected = !exact && top !== undefined && top.inliers >= INLIER_MIN && top.inlierL1 <= INLIER_L1_MAX
+  const inconclusive = !exact && !corrected
   return (
-    <div className={css.batchGuess} data-confidence={exact ? 'high' : 'low'}>
+    <div className={css.batchGuess} data-confidence={exact ? 'high' : corrected ? 'medium' : 'low'}>
       <div className={css.modeRow}>
         <h3 className={css.modeLabel}>{t('attr.fertility.card')}</h3>
         <span className={css.attrBadge}>{t('attr.fertility.coverage')} {verdict.measured}/9</span>
@@ -929,27 +937,40 @@ function FertilityCard({ stored, t }: {
         <p className={css.empty}>{t('attr.fertility.incomplete')}</p>
       ) : (
         <>
-          <div className={css.candidate} data-attr={exact ? 'likely' : 'possible'}>
-            <div className={css.candidateHead}>
-              <span className={css.candidateName}>
-                {tied.length > 1
-                  ? tied.map(candidate => t(`vendor.${candidate.family.vendor}`)).join(' / ')
-                  : t(`vendor.${top.family.vendor}`)}
-              </span>
-              <span className={css.candidateScore}>
-                L1 <b>{top.l1}</b>
-                {exact ? ` · ${t('attr.fertility.exact')}` : tie ? ` · ${t('attr.fertility.pair')}` : ''}
-              </span>
-            </div>
-            <div className={css.candidateEvidence}>
-              {verdict.candidates.slice(0, 3).map(candidate => (
-                <span className={css.patternItem} key={candidate.family.id} title={candidate.family.model}>
-                  <span className={css.patternKey}>{t(`vendor.${candidate.family.vendor}`)}</span>
-                  <span className={css.patternCount}>L1 {candidate.l1}</span>
+          {inconclusive ? (
+            <p className={css.empty}>{t('attr.fertility.inconclusive')}</p>
+          ) : (
+            <div className={css.candidate} data-attr={exact ? 'likely' : 'possible'}>
+              <div className={css.candidateHead}>
+                <span className={css.candidateName}>
+                  {tied.length > 1
+                    ? tied.map(candidate => t(`vendor.${candidate.family.vendor}`)).join(' / ')
+                    : t(`vendor.${top.family.vendor}`)}
                 </span>
-              ))}
+                <span className={css.candidateScore}>
+                  {exact
+                    ? <>L1 <b>{top.l1}</b> · {t('attr.fertility.exact')}{tied.length > 1 ? ` · ${t('attr.fertility.pair')}` : ''}</>
+                    : <>{t('attr.fertility.inliers')} <b>{top.inliers}</b>/{verdict.measured} · L1 {top.inlierL1} · {t('attr.fertility.corrected')}</>}
+                </span>
+              </div>
+              <div className={css.candidateEvidence}>
+                {verdict.candidates.slice(0, 3).map(candidate => (
+                  <span className={css.patternItem} key={candidate.family.id} title={candidate.family.model}>
+                    <span className={css.patternKey}>{t(`vendor.${candidate.family.vendor}`)}</span>
+                    <span className={css.patternCount}>L1 {candidate.l1}</span>
+                  </span>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
+          {drift && spread !== null && (
+            <p className={css.leakFacts}>
+              {t('attr.fertility.drift')
+                .replace('{spread}', String(spread))
+                .replace('{inliers}', String(top.inliers))
+                .replace('{measured}', String(verdict.measured))}
+            </p>
+          )}
           {verdict.wrapperBaseline !== null && (
             <p className={css.leakFacts}>{t('attr.fertility.wrapper')} {verdict.wrapperBaseline}</p>
           )}

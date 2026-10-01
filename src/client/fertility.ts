@@ -35,8 +35,10 @@
  * FERTILITY_VERSION bumps when the texts or the reference table change.
  */
 
-/** Version of the fertility probe texts and the reference table. */
-export const FERTILITY_VERSION = 1 as const
+/** Version of the fertility probe texts, the reference table and the verdict
+ *  schema (panel-persist keys stored verdicts on this; a bump invalidates
+ *  stale stored verdicts so they are never re-displayed under new semantics). */
+export const FERTILITY_VERSION = 2 as const
 
 /** Fixed probe texts: T0 baseline + T1–T9 tokenizer-divergence dimensions. */
 export const FERTILITY_TEXTS: readonly { readonly id: string; readonly text: string }[] = [

@@ -261,6 +261,14 @@ interface FertRunState {
   probeIds: readonly string[]
   /** probeId → pre-created/created session id (survives restarts: the host keeps sessions). */
   sessionIds: Record<string, string>
+  /**
+   * Probe ids whose text was already pushed into their session. A crash
+   * between send and reading leaves the text parked in that session — a
+   * resume must give such probes a FRESH session, never re-send into the
+   * old one (a double send doubles the wrapper in the reading and corrupts
+   * the whole vector; measured 2026-10-01 on the real host).
+   */
+  sent?: readonly string[]
   /** Completed probe readings, reused verbatim on resume. */
   done: readonly { probeId: string; status: 'answered' | 'timeout' | 'failed'; promptTokens: number | null; outputTokens: number | null; sessionId: string }[]
 }
@@ -331,6 +339,10 @@ function interruptedFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActi
  * needs to bring a probe session to the front, and switching sessions or
  * models mid-run does not affect already-created probe sessions (all probe
  * sessions are pre-created up front, locking the serving model at start).
+ * Because background projections are per-session, the pending probes also
+ * run CONCURRENTLY on that path (bounded by FERTILITY_PARALLELISM), cutting
+ * wall time to roughly latency × ⌈n / parallelism⌉; the 0.1.x foreground
+ * path polls the single open conversation and stays strictly sequential.
  *
  * Crash-safe: the run state (pre-created session ids + completed readings)
  * is persisted after every step. If the host process dies mid-run, the panel
@@ -351,15 +363,23 @@ function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['run
         && items.every((item, i) => prev.probeIds[i] === item.id)
       const doneMap = new Map<string, FertRunState['done'][number]>()
       const sessionIds: Record<string, string> = {}
+      const sent = new Set<string>()
       if (resume && prev !== null) {
-        for (const d of prev.done) doneMap.set(d.probeId, d)
+        // Only ANSWERED readings are measurements: failed/timeout probes
+        // re-run (their old sessions may already hold the sent text, which
+        // the `sent` set below tracks).
+        for (const d of prev.done) {
+          if (d.status === 'answered' && d.promptTokens !== null) doneMap.set(d.probeId, d)
+        }
         Object.assign(sessionIds, prev.sessionIds)
+        for (const id of prev.sent ?? []) sent.add(id)
       }
 
       const state = (): FertRunState => ({
         startedAt: prev?.startedAt ?? new Date().toISOString(),
         probeIds: items.map(item => item.id),
         sessionIds,
+        sent: [...sent],
         done: [...doneMap.values()],
       })
 
@@ -368,12 +388,17 @@ function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['run
       //      a mid-run model switch cannot mix fingerprints. Created ids are
       //      persisted one by one: a crash right after this loop still leaves
       //      every session recoverable through sessions.retain().
+      //      Probes with a reused answered reading need no session. Probes
+      //      whose session is `sent`-tainted get a FRESH one — the old session
+      //      may already contain the probe text, and re-sending would double
+      //      the wrapper in the reading.
       const opened: { id: string; session?: { prompt?: unknown }; release?: () => void }[] = []
       for (let index = 0; index < items.length; index++) {
         const item = items[index]!
         onProgress?.({ index, total: items.length, probeId: item.id, status: 'sending' })
+        if (doneMap.has(item.id)) continue
         const existingId = sessionIds[item.id]
-        if (existingId !== undefined && typeof sessions.retain === 'function') {
+        if (existingId !== undefined && !sent.has(item.id) && typeof sessions.retain === 'function') {
           // Resume path: the session survived the restart on the host — re-activate.
           const reference = sessions.retain(existingId, { source: 'gateway' })
           await reference.ready
@@ -387,45 +412,60 @@ function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['run
         const created = await createOpenedSession(sessions)
         if (created === undefined) return { ok: false, error: 'unavailable' }
         sessionIds[item.id] = created.id
+        sent.delete(item.id)
         opened[index] = created
         writeFertRunState(storage, state())
       }
       if (prev === null || !resume) writeFertRunState(storage, state())
 
-      // --- Phase 2: send each probe and collect through the projections path.
-      for (let index = 0; index < items.length; index++) {
+      // 0.2.0 projections channel: per-session tokenUsage projections served
+      // for background sessions — the only path where concurrent probe
+      // collection is possible (0.1.x polls the single foreground view).
+      const list = (sessions as { list?: { getSnapshot?: () => unknown } }).list
+      const projectionsChannel = ((list?.getSnapshot?.() as { projectionsBySession?: unknown } | undefined)?.projectionsBySession ?? null) !== null
+
+      // Reused readings (resume) fill their slots up front and report once.
+      const turnsByIndex: (BatchTurnResult | undefined)[] = items.map((item, index) => {
+        const finished = doneMap.get(item.id)
+        if (finished === undefined) return undefined
+        onProgress?.({ index, total: items.length, probeId: item.id, status: finished.status })
+        return { probeId: item.id, status: finished.status, text: '', promptTokens: finished.promptTokens ?? undefined, outputTokens: finished.outputTokens ?? undefined }
+      })
+      // Probes that actually need to run (no answered reading yet).
+      const pending = items
+        .map((_item, index) => index)
+        .filter(index => turnsByIndex[index] === undefined)
+
+      const measureProbe = async (index: number): Promise<BatchTurnResult> => {
         const item = items[index]!
         const report = (status: BatchProgress['status']): void =>
           onProgress?.({ index, total: items.length, probeId: item.id, status })
-        const finished = doneMap.get(item.id)
-        if (finished !== undefined) {
-          // Resume: reuse the persisted reading verbatim.
-          turns.push({ probeId: item.id, status: finished.status, text: '', promptTokens: finished.promptTokens ?? undefined, outputTokens: finished.outputTokens ?? undefined })
-          report(finished.status)
-          continue
-        }
         report('sending')
         const { id, session, release } = opened[index]!
         const prompt = (session as { prompt?: unknown } | undefined)?.prompt
         if (typeof prompt !== 'function') {
           release?.()
-          return { ok: false, error: 'unavailable' }
+          throw new Error('unavailable')
         }
         const send = (prompt as (parts: readonly { type: 'text'; text: string }[], mode: 'queue' | 'steer') =>
           Promise<{ ok?: boolean; error?: { message?: string } }>).bind(session)
+        // Persist BEFORE sending: a crash after the send leaves the text in
+        // the session, and the `sent` marker forces any resume onto a fresh
+        // session instead of a double send.
+        sent.add(item.id)
+        writeFertRunState(storage, state())
         const result = await send([{ type: 'text', text: item.text }], 'queue')
         if (result !== undefined && result !== null && result.ok === false) {
           release?.()
-          const failedTurn = { probeId: item.id, status: 'failed' as const, text: '', sessionId: id }
-          doneMap.set(item.id, { ...failedTurn, promptTokens: null, outputTokens: null })
+          const failedTurn = { probeId: item.id, status: 'failed' as const, text: '' }
+          doneMap.set(item.id, { ...failedTurn, promptTokens: null, outputTokens: null, sessionId: id })
           writeFertRunState(storage, state())
-          turns.push(failedTurn)
           report('failed')
-          continue
+          return failedTurn
         }
         report('waiting')
         let turn: BatchTurnResult
-        if (projectionUsageOf(sessions, id) !== null) {
+        if (projectionsChannel) {
           // 0.2.0 projections path — readings serve background sessions.
           turn = await waitForProjectionTurn(() => projectionUsageOf(sessions, id), item.id)
         } else {
@@ -433,18 +473,50 @@ function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['run
           const poll = pollOf(ctx, id, sessions)
           if (poll === null) {
             release?.()
-            return { ok: false, error: 'unavailable' }
+            throw new Error('unavailable')
           }
           turn = await waitForTurn(poll, 0, item.id)
         }
         // Persist the reading BEFORE releasing: a crash after this line still
         // keeps the measurement, and the release only starts local teardown.
+        // The sent marker only clears on an ANSWERED reading — a timeout left
+        // the text in the session, so a resume re-runs it in a fresh one.
+        if (turn.status === 'answered') sent.delete(item.id)
         doneMap.set(item.id, { probeId: item.id, status: turn.status, promptTokens: turn.promptTokens ?? null, outputTokens: turn.outputTokens ?? null, sessionId: id })
         writeFertRunState(storage, state())
         release?.()
-        turns.push(turn)
         report(turn.status)
+        return turn
       }
+
+      if (pending.length > 0 && projectionsChannel && FERTILITY_PARALLELISM > 1) {
+        // Bounded worker pool: each worker pulls the next pending probe,
+        // sends it, and waits for its own session's reading. A hard
+        // "unavailable" stops the pool; in-flight probes still finish and
+        // persist their readings, so a resume reuses them.
+        let cursor = 0
+        let hardError: string | null = null
+        const worker = async (): Promise<void> => {
+          while (hardError === null) {
+            const slot = cursor
+            if (slot >= pending.length) return
+            cursor += 1
+            try {
+              turnsByIndex[pending[slot]!] = await measureProbe(pending[slot]!)
+            } catch (error) {
+              hardError = error instanceof Error ? error.message : String(error)
+            }
+          }
+        }
+        await Promise.all(Array.from({ length: Math.min(FERTILITY_PARALLELISM, pending.length) }, worker))
+        if (hardError !== null) return { ok: false, error: hardError }
+      } else {
+        // Sequential: the 0.1.x foreground path (or a parallelism of 1).
+        for (const index of pending) {
+          turnsByIndex[index] = await measureProbe(index)
+        }
+      }
+      for (let index = 0; index < items.length; index++) turns.push(turnsByIndex[index]!)
       clearFertRunState(storage)
       return { ok: true, turns }
     } catch (error) {
@@ -544,6 +616,14 @@ function runBatchOf(ctx: ClientContext): NonNullable<ModelTesterActions['runBatc
 /** Poll cadence and per-turn ceiling for the batch runner. */
 const POLL_INTERVAL_MS = 800
 const TURN_TIMEOUT_MS = 150_000
+
+/**
+ * Max fertility probes in flight at once on the 0.2.0 projections path.
+ * Bounded to stay polite with the gateway (free-tier rate limits and the
+ * user's own traffic share it); wall time scales roughly as
+ * latency × ⌈probes / parallelism⌉. 1 disables concurrency.
+ */
+const FERTILITY_PARALLELISM = 4
 
 /**
  * Snapshot poller for one session: prefers the 0.1.2+ conversation assembly

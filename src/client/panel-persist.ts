@@ -100,13 +100,14 @@ export function parseStoredFertility(raw: unknown): StoredFertility | null {
   const r = raw as { at?: unknown; verdict?: unknown }
   if (typeof r.at !== 'string' || typeof r.verdict !== 'object' || r.verdict === null) return null
   const v = r.verdict as {
-    measured?: unknown; measuredCounts?: unknown; wrapperBaseline?: unknown; usable?: unknown; candidates?: unknown
+    measured?: unknown; measuredCounts?: unknown; wrapperBaseline?: unknown; usable?: unknown
+    drift?: unknown; wrapperSpread?: unknown; candidates?: unknown
   }
   if (typeof v.measured !== 'number' || typeof v.usable !== 'boolean' || !Array.isArray(v.candidates)) return null
   const candidates = []
   for (const candidate of v.candidates) {
     if (typeof candidate !== 'object' || candidate === null) return null
-    const c = candidate as { familyId?: unknown; family?: unknown; l1?: unknown; dims?: unknown }
+    const c = candidate as { familyId?: unknown; family?: unknown; l1?: unknown; dims?: unknown; inliers?: unknown; inlierL1?: unknown; offset?: unknown }
     // Accept both the normalized shape (familyId) and a legacy shape that
     // serialized the whole family object.
     const familyId = typeof c.familyId === 'string'
@@ -114,7 +115,12 @@ export function parseStoredFertility(raw: unknown): StoredFertility | null {
       : typeof (c.family as { id?: unknown } | null)?.id === 'string' ? (c.family as { id: string }).id : null
     const family = familyId === null ? undefined : FERTILITY_FAMILIES.find(f => f.id === familyId)
     if (family === undefined || typeof c.l1 !== 'number' || typeof c.dims !== 'number') return null
-    candidates.push({ family, l1: c.l1, dims: c.dims })
+    // Records from the pre-drift-guard scorer (v1) carry no consensus fields;
+    // they degrade to "everything inlier, offset 0" — display-only legacy.
+    const inliers = typeof c.inliers === 'number' ? c.inliers : c.dims
+    const inlierL1 = typeof c.inlierL1 === 'number' ? c.inlierL1 : c.l1
+    const offset = typeof c.offset === 'number' ? c.offset : 0
+    candidates.push({ family, l1: c.l1, dims: c.dims, inliers, inlierL1, offset })
   }
   const measuredCounts: Record<string, number> = {}
   if (typeof v.measuredCounts === 'object' && v.measuredCounts !== null) {
@@ -123,6 +129,7 @@ export function parseStoredFertility(raw: unknown): StoredFertility | null {
     }
   }
   const wrapperBaseline = typeof v.wrapperBaseline === 'number' ? v.wrapperBaseline : null
+  const wrapperSpread = typeof v.wrapperSpread === 'number' ? v.wrapperSpread : null
   return {
     at: r.at,
     verdict: {
@@ -131,6 +138,8 @@ export function parseStoredFertility(raw: unknown): StoredFertility | null {
       measuredCounts,
       usable: v.usable,
       wrapperBaseline,
+      wrapperSpread,
+      drift: v.drift === true,
     },
   }
 }
