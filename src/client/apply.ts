@@ -18,7 +18,7 @@
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import {
-  conversationViewOf, type ConversationPort, type ConversationView, type ConversationNodeView,
+  conversationViewOf, type AssistantBlockView, type ConversationPort, type ConversationView, type ConversationNodeView,
 } from './conversation.ts'
 import { ModelTesterPanel } from './ModelTesterPanel.tsx'
 import { trackTestSession } from './panel-persist.ts'
@@ -85,6 +85,7 @@ export function apply(ctx: ClientContext): void {
       sendProbe: sendProbeOf(ctx),
       runBatch: runBatchOf(ctx),
       runFertility: runFertilityOf(ctx),
+      rerunFertilityProbes: rerunFertilityProbesOf(ctx),
       interruptedFertility: interruptedFertilityOf(ctx),
       cleanupTestSessions: cleanupTestSessionsOf(ctx),
     },
@@ -220,11 +221,13 @@ function projectionUsageOf(
 /**
  * Wait for a background probe reply using the projections channel: output
  * tokens start growing, then hold steady across three consecutive polls —
- * the stable reading carries the turn's prompt-side count.
+ * the stable reading carries the turn's prompt-side count. Wakes fire on
+ * projection pushes, so the stability check sees fresh data immediately.
  */
 async function waitForProjectionTurn(
   read: () => { promptTokens: number; outputTokens: number } | null,
   probeId: string,
+  wakes: readonly ((notify: () => void) => () => void)[] = [],
 ): Promise<BatchTurnResult> {
   const deadline = Date.now() + TURN_TIMEOUT_MS
   let lastOutput = -1
@@ -232,7 +235,7 @@ async function waitForProjectionTurn(
   let sawData = false
   let last: { promptTokens: number; outputTokens: number } | null = null
   while (Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS))
+    await waitTick(POLL_INTERVAL_MS, wakes)
     last = read()
     if (last === null) continue
     sawData = true
@@ -327,6 +330,102 @@ function interruptedFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActi
   }
 }
 
+// ---------------------------------------------------------------------------
+// Batch run-state persistence — same crash contract as fertility, plus the
+// collected reply evidence (text + blocks) so a resumed run rebuilds the
+// aggregate without re-asking answered probes.
+// ---------------------------------------------------------------------------
+
+interface BatchRunState {
+  startedAt: string
+  probeIds: readonly string[]
+  /** probeId → pre-created/created session id (survives restarts). */
+  sessionIds: Record<string, string>
+  /** Probe ids whose text was already pushed into their session (resume must
+   * abandon those sessions — re-sending would append a second turn). */
+  sent?: readonly string[]
+  /** Completed probe readings, reused verbatim on resume. */
+  done: readonly {
+    probeId: string
+    status: 'answered' | 'timeout' | 'failed'
+    text: string
+    promptTokens: number | null
+    outputTokens: number | null
+    sessionId: string
+    prompt?: string
+    blocks?: readonly AssistantBlockView[]
+  }[]
+}
+
+const BATCH_RUN_KEY = 'dsh-modeltester.batch-run.v1'
+
+function readBatchRunState(storage: Storage | undefined): BatchRunState | null {
+  if (storage === undefined) return null
+  try {
+    const raw = storage.getItem(BATCH_RUN_KEY)
+    if (raw === null) return null
+    const parsed: unknown = JSON.parse(raw)
+    if (typeof parsed !== 'object' || parsed === null) return null
+    const r = parsed as Partial<BatchRunState>
+    if (!Array.isArray(r.probeIds) || typeof r.sessionIds !== 'object' || r.sessionIds === null || !Array.isArray(r.done)) return null
+    return r as BatchRunState
+  } catch {
+    return null
+  }
+}
+
+function writeBatchRunState(storage: Storage | undefined, state: BatchRunState): void {
+  if (storage === undefined) return
+  try {
+    storage.setItem(BATCH_RUN_KEY, JSON.stringify(state))
+  } catch {
+    /* private mode / quota: non-fatal */
+  }
+}
+
+function clearBatchRunState(storage: Storage | undefined): void {
+  if (storage === undefined) return
+  try {
+    storage.removeItem(BATCH_RUN_KEY)
+  } catch {
+    /* non-fatal */
+  }
+}
+
+/**
+ * Bounded worker pool over pending probe indexes. A hard "unavailable" stops
+ * the pool; in-flight probes still finish (their callers persist readings),
+ * so a resume reuses them. Returns the error message or null.
+ */
+async function runProbePool(
+  pending: readonly number[],
+  parallelism: number,
+  measure: (index: number) => Promise<void>,
+): Promise<string | null> {
+  let cursor = 0
+  let hardError: string | null = null
+  const worker = async (): Promise<void> => {
+    while (hardError === null) {
+      const slot = cursor
+      if (slot >= pending.length) return
+      cursor += 1
+      try {
+        await measure(pending[slot]!)
+      } catch (error) {
+        hardError = error instanceof Error ? error.message : String(error)
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(parallelism, pending.length) }, worker))
+  return hardError
+}
+
+/** Panel-configured parallelism, clamped to the polite 1–8 band. */
+function clampParallelism(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return FERTILITY_PARALLELISM
+  return Math.max(1, Math.min(8, Math.round(value)))
+}
+
 /**
  * Fertility runner: each item gets its OWN fresh session. Per-turn
  * prompt-side usage (totalTokens − outputTokens) is then the gateway wrapper
@@ -350,7 +449,7 @@ function interruptedFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActi
  * only the missing probes run.
  */
 function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['runFertility']> {
-  return async (items, onProgress) => {
+  return async (items, onProgress, options) => {
     const storage = typeof window === 'undefined' ? undefined : window.localStorage
     try {
       const sessions = ctx.sessions as unknown as ProbeSessionsPort
@@ -467,15 +566,15 @@ function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['run
         let turn: BatchTurnResult
         if (projectionsChannel) {
           // 0.2.0 projections path — readings serve background sessions.
-          turn = await waitForProjectionTurn(() => projectionUsageOf(sessions, id), item.id)
+          turn = await waitForProjectionTurn(() => projectionUsageOf(sessions, id), item.id, listWakes(sessions))
         } else {
           // 0.1.x foreground path — conversation snapshot of the open session.
-          const poll = pollOf(ctx, id, sessions)
-          if (poll === null) {
+          const poller = pollOf(ctx, id, sessions)
+          if (poller === null) {
             release?.()
             throw new Error('unavailable')
           }
-          turn = await waitForTurn(poll, 0, item.id)
+          turn = await waitForTurn(poller, 0, item.id)
         }
         // Persist the reading BEFORE releasing: a crash after this line still
         // keeps the measurement, and the release only starts local teardown.
@@ -489,26 +588,15 @@ function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['run
         return turn
       }
 
-      if (pending.length > 0 && projectionsChannel && FERTILITY_PARALLELISM > 1) {
+      const parallelism = clampParallelism(options?.parallelism)
+      if (pending.length > 0 && projectionsChannel && parallelism > 1) {
         // Bounded worker pool: each worker pulls the next pending probe,
         // sends it, and waits for its own session's reading. A hard
         // "unavailable" stops the pool; in-flight probes still finish and
         // persist their readings, so a resume reuses them.
-        let cursor = 0
-        let hardError: string | null = null
-        const worker = async (): Promise<void> => {
-          while (hardError === null) {
-            const slot = cursor
-            if (slot >= pending.length) return
-            cursor += 1
-            try {
-              turnsByIndex[pending[slot]!] = await measureProbe(pending[slot]!)
-            } catch (error) {
-              hardError = error instanceof Error ? error.message : String(error)
-            }
-          }
-        }
-        await Promise.all(Array.from({ length: Math.min(FERTILITY_PARALLELISM, pending.length) }, worker))
+        const hardError = await runProbePool(pending, parallelism, async index => {
+          turnsByIndex[index] = await measureProbe(index)
+        })
         if (hardError !== null) return { ok: false, error: hardError }
       } else {
         // Sequential: the 0.1.x foreground path (or a parallelism of 1).
@@ -518,6 +606,87 @@ function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['run
       }
       for (let index = 0; index < items.length; index++) turns.push(turnsByIndex[index]!)
       clearFertRunState(storage)
+      return { ok: true, turns }
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  }
+}
+
+/**
+ * Targeted drift re-run: re-measure ONLY the given fertility items, each in a
+ * FRESH session (never re-sent into an old one — a double send doubles the
+ * wrapper and corrupts the vector). No run-state machinery: the stored verdict
+ * stays the safe state the whole time, and a crash mid-retry simply means the
+ * panel can re-run the retry. The panel merges the fresh readings into the
+ * stored measuredCounts and re-scores; only a re-score that clears drift is
+ * adopted.
+ */
+function rerunFertilityProbesOf(ctx: ClientContext): NonNullable<ModelTesterActions['rerunFertilityProbes']> {
+  return async (items, onProgress, options) => {
+    try {
+      const sessions = ctx.sessions as unknown as ProbeSessionsPort
+      const turns: BatchTurnResult[] = []
+
+      // Fresh session per item, pre-created up front (locks the serving model).
+      const opened: { id: string; session?: { prompt?: unknown }; release?: () => void }[] = []
+      for (let index = 0; index < items.length; index++) {
+        const item = items[index]!
+        onProgress?.({ index, total: items.length, probeId: item.id, status: 'sending' })
+        const created = await createOpenedSession(sessions)
+        if (created === undefined) return { ok: false, error: 'unavailable' }
+        opened[index] = created
+      }
+
+      // 0.2.0 projections channel: usage readings serve background sessions,
+      // so the re-runs can go concurrent; 0.1.x polls the foreground view.
+      const list = (sessions as { list?: { getSnapshot?: () => unknown } }).list
+      const projectionsChannel = ((list?.getSnapshot?.() as { projectionsBySession?: unknown } | undefined)?.projectionsBySession ?? null) !== null
+
+      const measureProbe = async (index: number): Promise<void> => {
+        const item = items[index]!
+        const report = (status: BatchProgress['status']): void =>
+          onProgress?.({ index, total: items.length, probeId: item.id, status })
+        report('sending')
+        const { id, session, release } = opened[index]!
+        const prompt = (session as { prompt?: unknown } | undefined)?.prompt
+        if (typeof prompt !== 'function') {
+          release?.()
+          throw new Error('unavailable')
+        }
+        const send = (prompt as (parts: readonly { type: 'text'; text: string }[], mode: 'queue' | 'steer') =>
+          Promise<{ ok?: boolean; error?: { message?: string } }>).bind(session)
+        const result = await send([{ type: 'text', text: item.text }], 'queue')
+        if (result !== undefined && result !== null && result.ok === false) {
+          release?.()
+          report('failed')
+          turns.push({ probeId: item.id, status: 'failed', text: '' })
+          return
+        }
+        report('waiting')
+        let turn: BatchTurnResult
+        if (projectionsChannel) {
+          turn = await waitForProjectionTurn(() => projectionUsageOf(sessions, id), item.id, listWakes(sessions))
+        } else {
+          const poller = pollOf(ctx, id, sessions)
+          if (poller === null) {
+            release?.()
+            throw new Error('unavailable')
+          }
+          turn = await waitForTurn(poller, 0, item.id)
+        }
+        release?.()
+        report(turn.status)
+        turns.push(turn)
+      }
+
+      const parallelism = clampParallelism(options?.parallelism)
+      if (projectionsChannel && parallelism > 1) {
+        const hardError = await runProbePool(items.map((_item, index) => index), parallelism, measureProbe)
+        if (hardError !== null) return { ok: false, error: hardError }
+      } else {
+        for (let index = 0; index < items.length; index++) await measureProbe(index)
+      }
       return { ok: true, turns }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -561,51 +730,125 @@ function cleanupTestSessionsOf(ctx: ClientContext): NonNullable<ModelTesterActio
 }
 
 /**
- * Batch probe-send over the host sessions face: create ONE fresh session, then
- * send each probe in order, polling the conversation assembly for the turn to
- * finish before the next probe. Every host member is feature-detected; the
- * action is only meaningfully available when create/open/prompt AND a pollable
- * snapshot exist — otherwise the panel falls back to per-probe copy/send.
+ * Batch probe-send over the host sessions face: every probe goes to its OWN
+ * fresh session, created IMMEDIATELY BEFORE its send. The host focuses the
+ * newly created session, and the conversation assembly materializes for that
+ * main-view session only — so the probe is sent and collected while its own
+ * session owns the view. This is the shape the real host validated
+ * (alpha.2's one-session batch collected 11/11; a pre-create + parallel
+ * variant measured 2026-10-02 on the desktop host collected 0/12 because
+ * background sessions have no assembly — usage projections do, which is why
+ * the fertility runner keeps its parallel background path).
+ *
+ * Per-probe sessions keep the isolation win: later probes never see earlier
+ * replies, and no cross-contamination enters the aggregate.
+ *
+ * Crash-safe: completed readings (text included) are persisted after every
+ * step; calling again with the same probe sequence reuses them and only
+ * re-runs the missing probes. The 0.1.x path is the same flow with `open()`.
  */
 function runBatchOf(ctx: ClientContext): NonNullable<ModelTesterActions['runBatch']> {
-  return async (items, onProgress) => {
+  return async (items, onProgress, _options) => {
+    const storage = typeof window === 'undefined' ? undefined : window.localStorage
     try {
       const sessions = ctx.sessions as unknown as ProbeSessionsPort
-      const opened = await createOpenedSession(sessions)
-      if (opened === undefined) return { ok: false, error: 'unavailable' }
-      const { id, session, release } = opened
-      const prompt = (session as { prompt?: unknown } | undefined)?.prompt
-      if (typeof prompt !== 'function') {
-        release?.()
-        return { ok: false, error: 'unavailable' }
-      }
-      const poll = pollOf(ctx, id, sessions)
-      if (poll === null) {
-        release?.()
-        return { ok: false, error: 'unavailable' }
-      }
-
-      const send = (prompt as (parts: readonly { type: 'text'; text: string }[], mode: 'queue' | 'steer') =>
-        Promise<{ ok?: boolean; error?: { message?: string } }>).bind(session)
       const turns: BatchTurnResult[] = []
-      for (let index = 0; index < items.length; index++) {
+
+      // --- Resume reuse: same probe sequence → answered readings reused.
+      const prev = readBatchRunState(storage)
+      const resume = prev !== null
+        && prev.probeIds.length === items.length
+        && items.every((item, i) => prev.probeIds[i] === item.id)
+      const doneMap = new Map<string, BatchRunState['done'][number]>()
+      if (resume && prev !== null) {
+        for (const d of prev.done) {
+          if (d.status === 'answered') doneMap.set(d.probeId, d)
+        }
+      }
+      const state = (): BatchRunState => ({
+        startedAt: prev?.startedAt ?? new Date().toISOString(),
+        probeIds: items.map(item => item.id),
+        sessionIds: {},
+        sent: [],
+        done: [...doneMap.values()],
+      })
+
+      // Reused readings fill their slots up front and report once.
+      const turnsByIndex: (BatchTurnResult | undefined)[] = items.map((item, index) => {
+        const finished = doneMap.get(item.id)
+        if (finished === undefined) return undefined
+        onProgress?.({ index, total: items.length, probeId: item.id, status: finished.status })
+        return {
+          probeId: item.id,
+          status: finished.status,
+          text: finished.text,
+          ...(finished.prompt === undefined ? {} : { prompt: finished.prompt }),
+          ...(finished.blocks === undefined ? {} : { blocks: finished.blocks }),
+          ...(finished.promptTokens === null ? {} : { promptTokens: finished.promptTokens }),
+          ...(finished.outputTokens === null ? {} : { outputTokens: finished.outputTokens }),
+        }
+      })
+      writeBatchRunState(storage, state())
+
+      const pending = items
+        .map((_item, index) => index)
+        .filter(index => turnsByIndex[index] === undefined)
+
+      for (const index of pending) {
         const item = items[index]!
         const report = (status: BatchProgress['status']): void =>
           onProgress?.({ index, total: items.length, probeId: item.id, status })
-        const before = assistantCountOf(poll())
         report('sending')
+        // Create the probe's own session immediately before sending: the host
+        // focuses it, so the assembly exists while this probe is collected.
+        const created = await createOpenedSession(sessions)
+        if (created === undefined) return { ok: false, error: 'unavailable' }
+        const { id, session, release } = created
+        const prompt = (session as { prompt?: unknown } | undefined)?.prompt
+        if (typeof prompt !== 'function') {
+          release?.()
+          return { ok: false, error: 'unavailable' }
+        }
+        const poller = pollOf(ctx, id, sessions)
+        if (poller === null) {
+          release?.()
+          return { ok: false, error: 'unavailable' }
+        }
+        const before = assistantCountOf(poller.read())
+        const send = (prompt as (parts: readonly { type: 'text'; text: string }[], mode: 'queue' | 'steer') =>
+          Promise<{ ok?: boolean; error?: { message?: string } }>).bind(session)
         const result = await send([{ type: 'text', text: item.text }], 'queue')
         if (result !== undefined && result !== null && result.ok === false) {
-          turns.push({ probeId: item.id, status: 'failed', text: '' })
+          doneMap.set(item.id, { probeId: item.id, status: 'failed', text: '', promptTokens: null, outputTokens: null, sessionId: id, prompt: item.text })
+          writeBatchRunState(storage, state())
+          release?.()
           report('failed')
+          turnsByIndex[index] = { probeId: item.id, status: 'failed', text: '', prompt: item.text }
           continue
         }
         report('waiting')
-        const turn = await waitForTurn(poll, before, item.id)
-        turns.push(turn)
+        const turn = await waitForTurn(poller, before, item.id, item.text)
+        doneMap.set(item.id, {
+          probeId: item.id,
+          status: turn.status,
+          text: turn.text,
+          promptTokens: turn.promptTokens ?? null,
+          outputTokens: turn.outputTokens ?? null,
+          sessionId: id,
+          prompt: item.text,
+          blocks: turn.blocks,
+        })
+        writeBatchRunState(storage, state())
+        release?.()
         report(turn.status)
+        turnsByIndex[index] = turn
       }
-      release?.()
+
+      for (let index = 0; index < items.length; index++) {
+        const turn = turnsByIndex[index]
+        if (turn !== undefined) turns.push(turn)
+      }
+      clearBatchRunState(storage)
       return { ok: true, turns }
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
@@ -613,9 +856,10 @@ function runBatchOf(ctx: ClientContext): NonNullable<ModelTesterActions['runBatc
   }
 }
 
-/** Poll cadence and per-turn ceiling for the batch runner. */
+/** Poll cadence fallback and per-turn ceiling for the runners. Wakes from the
+ *  host observables fire first; the timer only bounds the wait. */
 const POLL_INTERVAL_MS = 800
-const TURN_TIMEOUT_MS = 150_000
+const TURN_TIMEOUT_MS = 300_000
 
 /**
  * Max fertility probes in flight at once on the 0.2.0 projections path.
@@ -629,12 +873,23 @@ const FERTILITY_PARALLELISM = 4
  * Snapshot poller for one session: prefers the 0.1.2+ conversation assembly
  * (`uiConversation.binding(id)`), falls back to the session snapshot (rc.7–
  * 0.1.1 carry nodes on SessionFace). Returns null when neither is pollable.
+ *
+ * `wakes` are subscribe closures over the same host observables: pushes fire
+ * even when Chromium throttles timers in occluded windows, which is the
+ * normal state for probe sessions (the main window is usually backgrounded
+ * during a batch run) — timer-only polling stalls to ~1 tick/minute there
+ * (measured 2026-10-02 on the desktop host).
  */
+interface SessionPoller {
+  read: () => ConversationView | undefined
+  wakes: readonly ((notify: () => void) => () => void)[]
+}
+
 function pollOf(
   ctx: ClientContext,
   id: string,
   sessions: ProbeSessionsPort,
-): (() => ConversationView | undefined) | null {
+): SessionPoller | null {
   const ui = ctx.get('uiConversation') as { binding?: (sessionId: string) => ConversationPort } | undefined
   const conversation = ui !== undefined && typeof ui.binding === 'function' ? ui.binding(id) : undefined
   const sessionPort = sessions.binding?.(id)?.session
@@ -646,15 +901,71 @@ function pollOf(
     ? () => conversation.snapshot.getSnapshot()
     : null
   if (readSession === null && readConversation === null) return null
-  return () => {
+  const wakes: ((notify: () => void) => () => void)[] = []
+  if (conversation !== undefined && typeof conversation.snapshot?.subscribe === 'function') {
+    wakes.push(notify => conversation.snapshot.subscribe(notify))
+  }
+  if (sessionPort !== undefined && typeof (sessionPort as { subscribe?: unknown }).subscribe === 'function') {
+    const subscribe = (sessionPort as unknown as { subscribe: (fn: () => void) => () => void }).subscribe
+    wakes.push(notify => subscribe.call(sessionPort, notify))
+  }
+  return {
+    read: () => {
+      try {
+        const sessionRaw = readSession?.()
+        const conversationRaw = readConversation?.()
+        if (sessionRaw === undefined) return conversationRaw === undefined ? undefined : conversationViewOf(conversationRaw)
+        return conversationViewOf(sessionRaw, conversationRaw ?? sessionRaw)
+      } catch {
+        // A session being created/opened may briefly publish nothing pollable.
+        return undefined
+      }
+    },
+    wakes,
+  }
+}
+
+/** Subscriptions over the session-list snapshot — projection updates push. */
+function listWakes(sessions: ProbeSessionsPort): readonly ((notify: () => void) => () => void)[] {
+  const list = (sessions as { list?: { subscribe?: (fn: () => void) => () => void } }).list
+  if (list !== undefined && typeof list.subscribe === 'function') return [notify => list.subscribe!(notify)]
+  return []
+}
+
+/**
+ * One wait tick: settle after `ms` OR at the first observable push, whichever
+ * comes first. With working subscriptions a finished reply is seen almost
+ * immediately; the timer is only the fallback (throttle-immune check).
+ */
+async function waitTick(ms: number, wakes: readonly ((notify: () => void) => () => void)[]): Promise<void> {
+  if (wakes.length === 0) {
+    await new Promise(resolve => setTimeout(resolve, ms))
+    return
+  }
+  let settled = false
+  let resolve: () => void = () => {}
+  const promise = new Promise<void>(r => { resolve = r })
+  const settle = (): void => {
+    if (settled) return
+    settled = true
+    resolve()
+  }
+  const unsubs: (() => void)[] = []
+  for (const wake of wakes) {
     try {
-      const sessionRaw = readSession?.()
-      const conversationRaw = readConversation?.()
-      if (sessionRaw === undefined) return conversationRaw === undefined ? undefined : conversationViewOf(conversationRaw)
-      return conversationViewOf(sessionRaw, conversationRaw ?? sessionRaw)
+      unsubs.push(wake(settle))
     } catch {
-      // A session being created/opened may briefly publish nothing pollable.
-      return undefined
+      /* a dead observable must not break the wait */
+    }
+  }
+  const timer = setTimeout(settle, ms)
+  await promise
+  clearTimeout(timer)
+  for (const unsub of unsubs) {
+    try {
+      unsub()
+    } catch {
+      /* non-fatal */
     }
   }
 }
@@ -670,6 +981,12 @@ function blockTextOf(nodes: readonly ConversationNodeView[]): string {
     .filter(block => block.kind === 'text' && typeof block.text === 'string')
     .map(block => block.text as string)
     .join('\n')
+}
+
+/** Raw assistant blocks of the given nodes (reasoning + visible). */
+function blocksOf(nodes: readonly ConversationNodeView[]): ConversationNodeView['blocks'] {
+  const collected = nodes.flatMap(node => node.blocks ?? [])
+  return collected.length > 0 ? collected : undefined
 }
 
 /**
@@ -693,24 +1010,43 @@ function usageOf(node: object): { promptTokens: number; outputTokens: number } |
 
 /** Poll until a new complete assistant turn exists (partial folded) or time out. */
 async function waitForTurn(
-  poll: () => ConversationView | undefined,
+  poller: SessionPoller,
   before: number,
   probeId: string,
+  prompt?: string,
 ): Promise<BatchTurnResult> {
   const deadline = Date.now() + TURN_TIMEOUT_MS
   while (Date.now() < deadline) {
-    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS))
-    const view = poll()
+    await waitTick(POLL_INTERVAL_MS, poller.wakes)
+    const view = poller.read()
     const nodes = view?.nodes.filter(node => node.kind === 'assistant') ?? []
     if (nodes.length > before && view?.partial === null) {
       const node = nodes[before]!
-      return { probeId, status: 'answered', text: blockTextOf(nodes.slice(before)), ...usageOf(node) }
+      const tail = nodes.slice(before)
+      const blocks = blocksOf(tail)
+      return {
+        probeId,
+        status: 'answered',
+        text: blockTextOf(tail),
+        ...(prompt === undefined ? {} : { prompt }),
+        ...(blocks === undefined ? {} : { blocks }),
+        ...usageOf(node),
+      }
     }
   }
-  const view = poll()
+  const view = poller.read()
   const nodes = view?.nodes.filter(node => node.kind === 'assistant') ?? []
   const node = nodes[before]
-  return { probeId, status: 'timeout', text: blockTextOf(nodes.slice(before)), ...(node === undefined ? {} : usageOf(node) ?? {}) }
+  const tail = nodes.slice(before)
+  const blocks = blocksOf(tail)
+  return {
+    probeId,
+    status: 'timeout',
+    text: blockTextOf(tail),
+    ...(prompt === undefined ? {} : { prompt }),
+    ...(blocks === undefined ? {} : { blocks }),
+    ...(node === undefined ? {} : usageOf(node) ?? {}),
+  }
 }
 /**
  * Resolve the 0.1.2+ conversation assembly for one session, if the host

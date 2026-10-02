@@ -12,6 +12,7 @@
 import type {
   HostObservable, InjectFace, PropsLocale, PropsRuntime,
 } from '@deepseek-ai/dsh-client-ui-slots'
+import type { AssistantBlockView } from './conversation.ts'
 import type { StatsSnapshot } from './session-store.ts'
 
 /** One finished probe turn of a batch run. */
@@ -24,6 +25,10 @@ export interface BatchTurnResult {
   readonly promptTokens?: number
   /** Output (completion) tokens of this turn's reply, when reported. */
   readonly outputTokens?: number
+  /** The probe prompt this turn answers (batch runs; feeds echo suppression). */
+  readonly prompt?: string
+  /** Raw assistant blocks (reasoning + visible) when the host exposed them. */
+  readonly blocks?: readonly AssistantBlockView[]
 }
 
 /** Progress event for one probe of a batch run. */
@@ -32,6 +37,11 @@ export interface BatchProgress {
   readonly total: number
   readonly probeId: string
   readonly status: 'sending' | 'waiting' | 'answered' | 'timeout' | 'failed'
+}
+
+/** Runner options. `parallelism` bounds concurrent probes (1 = sequential). */
+export interface RunOptions {
+  readonly parallelism?: number
 }
 
 /** Probe-send actions backed by the host sessions face (feature-detected). */
@@ -43,24 +53,39 @@ export interface ModelTesterActions {
    */
   sendProbe(text: string): Promise<{ ok: boolean; error?: string }>
   /**
-   * Batch runner: create ONE fresh session, then send each probe in order,
-   * waiting for its reply before the next (progress reported per probe).
-   * Optional — present only when the host face exposes create/open/prompt and
-   * a pollable conversation snapshot.
+   * Batch runner: each probe goes to its OWN fresh session, created
+   * immediately before its send and collected while the host has it focused
+   * (the conversation assembly materializes for the focused session only).
+   * Probes run sequentially; isolation keeps later probes blind to earlier
+   * replies. Completed readings are persisted, so re-calling with the same
+   * sequence after a crash reuses them. Optional — present only when the
+   * host face exposes create/prompt and a pollable conversation snapshot.
    */
   runBatch?(
     items: readonly { id: string; text: string }[],
     onProgress?: (progress: BatchProgress) => void,
+    options?: RunOptions,
   ): Promise<{ ok: boolean; error?: string; turns?: readonly BatchTurnResult[] }>
   /**
-   * Fertility runner: like `runBatch`, but each item goes to its OWN fresh
-   * session. Per-turn prompt-side usage is then directly comparable across
-   * items (the host-managed context of one shared session would distort the
-   * deltas). Optional for the same reasons as `runBatch`.
+   * Fertility runner: like `runBatch`, but usage-only readings (prompt-side
+   * tokens per fresh session) — collected via the 0.2.0 session projections
+   * where available. Optional for the same reasons as `runBatch`.
    */
   runFertility?(
     items: readonly { id: string; text: string }[],
     onProgress?: (progress: BatchProgress) => void,
+    options?: RunOptions,
+  ): Promise<{ ok: boolean; error?: string; turns?: readonly BatchTurnResult[] }>
+  /**
+   * Targeted drift re-run: re-measure ONLY the given fertility items, each in
+   * a fresh session, with no run-state machinery — the stored verdict stays
+   * the safe state while the outliers are refreshed. The panel merges the
+   * new readings into the stored measuredCounts and re-scores.
+   */
+  rerunFertilityProbes?(
+    items: readonly { id: string; text: string }[],
+    onProgress?: (progress: BatchProgress) => void,
+    options?: RunOptions,
   ): Promise<{ ok: boolean; error?: string; turns?: readonly BatchTurnResult[] }>
   /**
    * Query an interrupted fertility run (crash / host restart mid-run), if any.

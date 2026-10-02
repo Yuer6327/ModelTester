@@ -1,7 +1,7 @@
 {
   "name": "dsh-modeltester",
-  "version": "0.0.7-alpha.2",
-  "description": "ModelTester — model detection & attribution panel for the DeepSeek Harness web chat. Ranks vendor families (DeepSeek / Anthropic / OpenAI / Google / Qwen / GLM / Kimi / MiniMax / MiMo / LongCat / InternLM / Step / Yi / Llama / Mistral / Nemotron / Grok / Ling) from structural fingerprints — template & tokenizer leaks, dirty tokens, trajectory vocabulary, probe canaries — with a full evidence ledger, gray-test signal detection, and a usage-delta fertility drill for quantitative tokenizer identification.",
+  "version": "0.0.7-alpha.4",
+  "description": "ModelTester — model detection & attribution panel for the DeepSeek Harness web chat. Ranks vendor families (DeepSeek / Anthropic / OpenAI / Google / Qwen / GLM / Kimi / MiniMax / MiMo / Baichuan / SkyWork / LongCat / InternLM / Step / Yi / Llama / Mistral / Nemotron / Grok / Ling / ERNIE / Hunyuan / Seed / MiniCPM / Phi / OLMo / Granite / Falcon / EXAONE) from structural fingerprints — template & tokenizer leaks, dirty tokens, family canaries — with a full evidence ledger and a usage-delta fertility fingerprint (25 official tokenizer reference vectors) for quantitative tokenizer identification.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {
@@ -21,10 +21,10 @@
     "docs"
   ],
   "scripts": {
-    "build": "tsdown",
+    "build": "tsdown && node sync-local.mjs",
     "prepare": "pnpm build",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types verify.mjs && node --experimental-strip-types verify-dsh-std.mjs && node --experimental-strip-types verify-batch.mjs && node verify-fingerprint-drill.mjs && node --experimental-strip-types verify-fertility-score.mjs",
+    "test": "node --experimental-strip-types verify.mjs && node --experimental-strip-types verify-dsh-std.mjs && node --experimental-strip-types verify-batch.mjs && node verify-fingerprint-drill.mjs && node --experimental-strip-types verify-fertility-score.mjs && node --experimental-strip-types verify-fertility-confusion.mjs && node --experimental-strip-types verify-verdict.mjs",
     "compat": "node verify-dsh-host.mjs",
     "dsh-releases": "node verify-dsh-releases.mjs"
   },

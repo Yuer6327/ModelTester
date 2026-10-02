@@ -101,7 +101,7 @@ export function parseStoredFertility(raw: unknown): StoredFertility | null {
   if (typeof r.at !== 'string' || typeof r.verdict !== 'object' || r.verdict === null) return null
   const v = r.verdict as {
     measured?: unknown; measuredCounts?: unknown; wrapperBaseline?: unknown; usable?: unknown
-    drift?: unknown; wrapperSpread?: unknown; candidates?: unknown
+    drift?: unknown; wrapperSpread?: unknown; candidates?: unknown; outlierDims?: unknown
   }
   if (typeof v.measured !== 'number' || typeof v.usable !== 'boolean' || !Array.isArray(v.candidates)) return null
   const candidates = []
@@ -130,6 +130,9 @@ export function parseStoredFertility(raw: unknown): StoredFertility | null {
   }
   const wrapperBaseline = typeof v.wrapperBaseline === 'number' ? v.wrapperBaseline : null
   const wrapperSpread = typeof v.wrapperSpread === 'number' ? v.wrapperSpread : null
+  const outlierDims = Array.isArray(v.outlierDims)
+    ? v.outlierDims.filter((d): d is string => typeof d === 'string')
+    : []
   return {
     at: r.at,
     verdict: {
@@ -140,6 +143,7 @@ export function parseStoredFertility(raw: unknown): StoredFertility | null {
       wrapperBaseline,
       wrapperSpread,
       drift: v.drift === true,
+      outlierDims,
     },
   }
 }
@@ -197,4 +201,27 @@ export function loadStoredFertility(): StoredFertility | null {
 /** Persist a fertility verdict (overwrites the previous one). */
 export function saveStoredFertility(record: StoredFertility): void {
   writeRaw(FERTILITY_KEY, record)
+}
+
+/** Probe-run parallelism (1–8) the user picked; 4 by default. */
+const PARALLELISM_KEY = 'dsh-modeltester.parallelism'
+
+export function loadParallelism(): number {
+  try {
+    const raw = typeof window === 'undefined' ? null : window.localStorage.getItem(PARALLELISM_KEY)
+    const value = raw === null ? NaN : Number(raw)
+    if (!Number.isFinite(value)) return 4
+    return Math.max(1, Math.min(8, Math.round(value)))
+  } catch {
+    return 4
+  }
+}
+
+export function saveParallelism(value: number): void {
+  const clamped = Math.max(1, Math.min(8, Math.round(value)))
+  try {
+    if (typeof window !== 'undefined') window.localStorage.setItem(PARALLELISM_KEY, String(clamped))
+  } catch {
+    /* non-fatal */
+  }
 }

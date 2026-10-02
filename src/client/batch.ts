@@ -16,8 +16,10 @@
  * to a strong verdict.
  */
 
-import type { AttributionReport } from './attribution.ts'
+import type { AssistantBlockView, ConversationNodeView, ConversationView } from './conversation.ts'
+import { attributeSession, type AttributionReport } from './attribution.ts'
 import { VENDORS, type Vendor } from './attribution-signals.ts'
+import { FAMILY_CANARIES } from './canaries.ts'
 import { PROBES, type ProbeEntry } from './probes.ts'
 import { TOKENIZER_FEATURE_SETS } from './tokenizers.ts'
 
@@ -64,6 +66,80 @@ export function familyHitsOf(
     if (found.size > 0) hits.push({ vendor: set.vendor, tokens: [...found] })
   }
   return hits
+}
+
+/**
+ * Family-canary scoring over the canary probe's reply (canaries.ts). Each
+ * canary is a single token in exactly one reference family's vocab; the echo
+ * battery asks for one verbatim repetition per line, so ≥ 2 occurrences of a
+ * canary in the reply is a repetition loop — the SolidGoldMagikarp signature
+ * of an under-trained token, pointing at the family that owns it. A clean
+ * echo (0 or 1 occurrence) is no evidence in either direction.
+ */
+export function canaryEchoOf(
+  turns: readonly { probeId: string; text: string }[],
+): readonly FamilyHit[] {
+  const text = turns
+    .filter(turn => turn.probeId === 'canary')
+    .map(turn => turn.text)
+    .join('\n')
+  if (text === '') return []
+  const hits: { vendor: Vendor; tokens: string[] }[] = []
+  for (const set of FAMILY_CANARIES) {
+    const degenerate = set.canaries.filter(canary => {
+      let at = 0
+      let count = 0
+      while ((at = text.indexOf(canary, at)) !== -1) {
+        count += 1
+        at += canary.length
+      }
+      return count >= 2
+    })
+    if (degenerate.length > 0) hits.push({ vendor: set.vendor, tokens: degenerate })
+  }
+  return hits
+}
+
+/** One collected batch turn as the engine-report builder reads it. */
+export interface EngineTurnInput {
+  readonly probeId: string
+  /** The probe prompt (user side — echo corpus + discussion detection). */
+  readonly prompt?: string
+  /** Raw assistant blocks (reasoning + visible); visible text only when the
+   * host could not capture blocks (resumed turns persist text alone). */
+  readonly blocks?: readonly AssistantBlockView[]
+  /** Visible reply text (always collected). */
+  readonly text: string
+}
+
+/**
+ * The passive engine's report over the batch corpus itself, built from the
+ * collected turns — per-probe user prompts feed echo suppression and
+ * discussion-turn detection with exactly the context each reply was elicited
+ * in, independent of which session the panel's live store happens to be bound
+ * to. Null when nothing was collected.
+ */
+export function batchEngineReportOf(turns: readonly EngineTurnInput[]): AttributionReport | null {
+  const nodes: ConversationNodeView[] = []
+  for (const turn of turns) {
+    if (turn.prompt !== undefined && turn.prompt !== '') {
+      nodes.push({ kind: 'user', seq: nodes.length, content: [{ type: 'text', text: turn.prompt }] })
+    }
+    const blocks = turn.blocks ?? (turn.text !== '' ? [{ kind: 'text', text: turn.text }] : [])
+    if (blocks.length > 0) {
+      nodes.push({ kind: 'assistant', seq: nodes.length, blocks })
+    }
+  }
+  if (nodes.length === 0) return null
+  const view: ConversationView = {
+    sessionId: 'modeltester-batch',
+    nodes,
+    partial: null,
+    openState: 'open',
+    hasMore: false,
+    loadingOlder: false,
+  }
+  return attributeSession(view)
 }
 
 /**
@@ -184,7 +260,7 @@ export function orderedProbes(): readonly ProbeEntry[] {
  * stealth models' self-descriptions are frequently bait, and a contradiction
  * with the structural ranking is itself informative.
  */
-const IDENTITY_CLAIM_PATTERNS: readonly { readonly vendor: Vendor; readonly re: RegExp }[] = [
+export const IDENTITY_CLAIM_PATTERNS: readonly { readonly vendor: Vendor; readonly re: RegExp }[] = [
   { vendor: 'deepseek', re: /\bdeepseek\b|深度求索/i },
   { vendor: 'anthropic', re: /\banthropic\b|\bclaude\b/i },
   { vendor: 'openai', re: /\bopenai\b|\bgpt-?[45o]/i },
@@ -203,6 +279,17 @@ const IDENTITY_CLAIM_PATTERNS: readonly { readonly vendor: Vendor; readonly re: 
   { vendor: 'yi', re: /\b01\.ai\b|零一万物|\byi-\d/i },
   { vendor: 'nvidia', re: /\bnvidia\b|英伟达|\bnemotron\b/i },
   { vendor: 'ling', re: /\bling\b|蚂蚁/i },
+  { vendor: 'baidu', re: /\bernie\b|百度|文心/i },
+  { vendor: 'tencent', re: /\bhunyuan\b|腾讯混元/i },
+  { vendor: 'bytedance', re: /\bseed-?\d|seed-oss|\bdoubao\b|豆包/i },
+  { vendor: 'openbmb', re: /\bminicpm\b|\bopenbmb\b|面壁/i },
+  { vendor: 'microsoft', re: /\bmicrosoft\b|微软|\bphi-?\d/i },
+  { vendor: 'ai2', re: /\bolmo\b|\ballenai\b|\bai2\b/i },
+  { vendor: 'ibm', re: /\bibm\b|\bgranite\b/i },
+  { vendor: 'tii', re: /\btii\b|\bfalcon\b/i },
+  { vendor: 'lg', re: /\bexaone\b/i },
+  { vendor: 'baichuan', re: /\bbaichuan\b|百川/i },
+  { vendor: 'skywork', re: /\bskywork\b|昆仑万维|天工/i },
 ]
 
 /**

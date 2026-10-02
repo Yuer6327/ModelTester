@@ -20,15 +20,20 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { formatCount, type TrajectoryStats } from './stats.ts'
-import { evidencePack, type AttributionEvidence, type AttributionReport } from './attribution.ts'
+import { evidencePack, type AttributionEvidence } from './attribution.ts'
 import { ALL_SIGNALS, type Vendor } from './attribution-signals.ts'
-import { loadStoredBatch, loadStoredFertility, saveStoredBatch, saveStoredFertility, type StoredBatch, type StoredFertility } from './panel-persist.ts'
-import { aggregateBatch, batchScanText, estimateTokens, familyHitsOf, identityClaimsOf, orderedProbes, type BatchGuess } from './batch.ts'
-import { FERTILITY_VERSION, FERTILITY_FAMILIES, FERTILITY_TEXTS } from './fertility.ts'
-import { fertilitySequence, fertilityVerdictOf, INLIER_L1_MAX, INLIER_MIN } from './fertility-score.ts'
+import { loadStoredBatch, loadStoredFertility, saveStoredBatch, saveStoredFertility, loadParallelism, saveParallelism, type StoredBatch, type StoredFertility } from './panel-persist.ts'
+import { aggregateBatch, batchEngineReportOf, batchScanText, canaryEchoOf, estimateTokens, familyHitsOf, identityClaimsOf, orderedProbes } from './batch.ts'
+import { FERTILITY_TEXTS, fertilityConfusablePair, fertilityTwinPair } from './fertility.ts'
+import { fertilitySequence, fertilityVerdictOf } from './fertility-score.ts'
+import {
+  agreementWith, batchChannel, finalVerdictOf, fertilityChannel, lexiconChannel, rankChannels,
+  type ChannelGrade, type ChannelResult,
+} from './verdict.ts'
 import { PROBES, type ProbeEntry } from './probes.ts'
 import { loadTestSessions, clearTestSessions } from './panel-persist.ts'
 import type { HistoryState } from './session-store.ts'
+import type { ModelTesterKey } from './locales.ts'
 import type { BatchProgress, ModelTesterActions, ModelTesterPanelProps } from './slots.ts'
 import css from './ModelTesterPanel.module.css'
 
@@ -51,6 +56,34 @@ const SPRING_C = 2 * Math.sqrt(SPRING_K) // zeta = 1.0
 
 /** Candidates shown before the "show all" expander kicks in. */
 const CANDIDATE_VISIBLE = 5
+
+/** i18n key per channel grade (existing verdict vocabulary, reused). */
+const GRADE_KEY: Readonly<Record<ChannelGrade, ModelTesterKey>> = {
+  exact: 'attr.fertility.exact',
+  corrected: 'attr.fertility.corrected',
+  high: 'attr.batch.conf.high',
+  medium: 'attr.batch.conf.medium',
+  low: 'attr.batch.conf.low',
+  likely: 'attr.likely',
+  possible: 'attr.possible',
+  inconclusive: 'attr.grade.inconclusive',
+  unmeasured: 'attr.channel.unmeasured',
+  unrun: 'attr.channel.unrun',
+  none: 'attr.none',
+}
+
+/** Accent tier of a grade: strong verdicts brand, middling ones warn. */
+function gradeAttr(grade: ChannelGrade): 'likely' | 'possible' | 'none' {
+  if (grade === 'exact' || grade === 'likely' || grade === 'high') return 'likely'
+  if (grade === 'corrected' || grade === 'medium' || grade === 'possible' || grade === 'low') return 'possible'
+  return 'none'
+}
+
+/** Display name of a channel result (near-duplicate pairs join with " / "). */
+function vendorLabelOf(result: ChannelResult, t: ModelTesterPanelProps['t']): string {
+  const named = result.tied.length > 0 ? result.tied : result.vendor !== null ? [result.vendor] : []
+  return named.map(vendor => t(`vendor.${vendor}`)).join(' / ')
+}
 
 /** Animated morph state. `o` = card-layer opacity (chip = 1 − o). */
 interface Morph {
@@ -199,7 +232,6 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
 
   const cardVisible = morph.o > 0
   const chipVisible = morph.o < 1
-  const attrTop = stats?.attribution.candidates[0]
 
   // Run state lives HERE, not in ProbesSection: a run switches the current
   // session (fertility: once per item), and a transient `stats === null`
@@ -213,12 +245,21 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
   const [fertStored, setFertStored] = useState<StoredFertility | null>(loadStoredFertility)
   const [fertError, setFertError] = useState('')
   const [fertInterrupted, setFertInterrupted] = useState<{ startedAt: string; done: number; total: number } | null>(null)
+  const [fertRetryFailed, setFertRetryFailed] = useState(false)
 
   // Detect an interrupted fertility run once on mount (crash / host restart).
   useEffect(() => {
     const found = actions?.interruptedFertility?.() ?? null
     if (found !== null) setFertInterrupted({ startedAt: found.startedAt, done: found.items.filter(i => i.status !== 'pending').length, total: found.total })
   }, [actions])
+
+  /** Panel-configured probe parallelism (1–8; persisted). */
+  const [parallelism, setParallelismState] = useState(loadParallelism)
+  const setParallelism = (value: number): void => {
+    setParallelismState(value)
+    saveParallelism(value)
+  }
+  const runOptions = { parallelism }
 
   /** Fertility run: one fresh session per text, scored by usage deltas.
    *  Resumes an interrupted run automatically (persisted readings reused). */
@@ -227,6 +268,7 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
     setFertRunning(true)
     setFertStored(null)
     setFertError('')
+    setFertRetryFailed(false)
     const interrupted = actions?.interruptedFertility?.()
     const prefill: Record<string, BatchProgress['status']> = {}
     if (interrupted !== null && interrupted !== undefined) {
@@ -239,7 +281,7 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
     try {
       const response = await actions.runFertility(items, progress0 => {
         setFertStatus(prev => ({ ...prev, [progress0.probeId]: progress0.status }))
-      })
+      }, runOptions)
       if (!response.ok || response.turns === undefined) {
         setFertError(response.error ?? 'unavailable')
         return
@@ -260,12 +302,62 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
     }
   }
 
+  /**
+   * Targeted drift re-run: re-measure ONLY the outlier dimensions in fresh
+   * sessions (drift is per-session random injection — a re-draw usually lands
+   * back on the baseline wrapper). The merged verdict replaces the stored one
+   * only when the re-run actually clears the drift flag; otherwise the stored
+   * verdict stands and the panel says so honestly.
+   */
+  const retryFertilityOutliers = async (): Promise<void> => {
+    if (fertRunning || fertStored === null || actions?.rerunFertilityProbes === undefined) return
+    const outliers = fertStored.verdict.outlierDims ?? []
+    if (outliers.length === 0) return
+    const textOf = new Map(FERTILITY_TEXTS.map(text => [text.id, text.text]))
+    const items = outliers.map(id => ({ id: `fert-${id}`, text: textOf.get(id) ?? '' })).filter(item => item.text !== '')
+    if (items.length === 0) return
+    setFertRunning(true)
+    setFertRetryFailed(false)
+    setFertStatus({})
+    try {
+      const response = await actions.rerunFertilityProbes(items, progress0 => {
+        setFertStatus(prev => ({ ...prev, [progress0.probeId]: progress0.status }))
+      }, runOptions)
+      if (!response.ok || response.turns === undefined) {
+        setFertError(response.error ?? 'unavailable')
+        return
+      }
+      // Merge: fresh readings override the stored counts for their dims.
+      const counts: Record<string, number> = { ...fertStored.verdict.measuredCounts }
+      for (const turn of response.turns) {
+        if (turn.status !== 'answered' || turn.promptTokens === undefined) continue
+        counts[turn.probeId.replace(/^fert-/, '')] = turn.promptTokens
+      }
+      const merged = fertilityVerdictOf(Object.entries(counts).map(([id, promptTokens]) => ({
+        probeId: id,
+        status: 'answered' as const,
+        promptTokens,
+      })))
+      if (merged.usable && !merged.drift) {
+        const record = { at: new Date().toISOString(), verdict: merged }
+        setFertStored(record)
+        saveStoredFertility(record)
+      } else {
+        setFertRetryFailed(true)
+      }
+    } catch {
+      setFertRetryFailed(true)
+    } finally {
+      setFertRunning(false)
+    }
+  }
+
   const [batchRunning, setBatchRunning] = useState(false)
   const [batchStatus, setBatchStatus] = useState<Record<string, BatchProgress['status']>>({})
   const [batchStored, setBatchStored] = useState<StoredBatch | null>(loadStoredBatch)
   const [batchError, setBatchError] = useState('')
 
-  /** Standard batch run: one fresh session, all given probes in order. */
+  /** Standard batch run: fresh session per probe, all given probes. */
   const runBatch = async (items: readonly { id: string; text: string }[]): Promise<void> => {
     if (batchRunning || actions?.runBatch === undefined) return
     setBatchRunning(true)
@@ -275,17 +367,19 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
     try {
       const response = await actions.runBatch(items, progress0 => {
         setBatchStatus(prev => ({ ...prev, [progress0.probeId]: progress0.status }))
-      })
+      }, runOptions)
       if (!response.ok || response.turns === undefined) {
         setBatchError(response.error ?? 'unavailable')
         return
       }
       const answered = response.turns.filter(turn => turn.status === 'answered').length
+      // Engine report over the batch corpus itself (per-probe prompts feed
+      // echo suppression), canary degeneration folded into the probe hits.
       const record: StoredBatch = {
         at: new Date().toISOString(),
         guess: aggregateBatch({
-          engine: statsRef.current?.attribution ?? null,
-          hits: familyHitsOf(batchScanText(response.turns)),
+          engine: batchEngineReportOf(response.turns),
+          hits: [...familyHitsOf(batchScanText(response.turns)), ...canaryEchoOf(response.turns)],
           answered,
           total: items.length,
         }),
@@ -316,6 +410,16 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
     await runFertility()
   }
 
+  /**
+   * Quick battery: the structural canary probes only (confidence 3 — tool
+   * format, template recognition, glitch, echo, family canaries). One or two
+   * minutes instead of the full battery; behavioral/bait probes are skipped.
+   */
+  const runQuickTests = async (): Promise<void> => {
+    if (batchRunning || fertRunning) return
+    await runBatch(PROBES.filter(probe => probe.confidence === 3).map(probe => ({ id: probe.id, text: probe.prompt })))
+  }
+
   /** Bulk-delete the sessions this plugin minted during test runs. */
   const runCleanup = async (): Promise<void> => {
     if (cleanupBusy || actions?.cleanupTestSessions === undefined) return
@@ -343,10 +447,24 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
     }
   }
 
+  // Cross-channel verdict: the usage fingerprint, the probe kit and the
+  // passive lexicon engine on one confidence scale — the chip and the card
+  // header both lead with the strongest channel's result.
+  const channels = useMemo(
+    () => rankChannels([
+      fertilityChannel(fertStored),
+      batchChannel(batchStored),
+      lexiconChannel(stats?.attribution ?? null),
+    ]),
+    [fertStored, batchStored, stats],
+  )
+  const final = finalVerdictOf(channels)
+  const agree = final !== null ? agreementWith(final, channels) : 0
+
   return (
     <div
       className={css.root}
-      data-attr={stats?.attribution.verdict}
+      data-attr={final !== null ? gradeAttr(final.grade) : undefined}
       data-streaming={stats?.streaming || undefined}
       role="region"
       aria-label={t('panel.aria')}
@@ -366,11 +484,11 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
           pointerEvents: morph.o < 0.5 ? 'auto' : 'none',
         }}
       >
-        <span className={css.chipDot} data-attr={stats?.attribution.verdict} aria-hidden="true" />
+        <span className={css.chipDot} data-attr={final !== null ? gradeAttr(final.grade) : undefined} aria-hidden="true" />
         <span>ModelTester</span>
-        {attrTop !== undefined && attrTop.verdict !== 'none' ? (
-          <span className={css.chipMode} data-attr={attrTop.verdict}>{t(`vendor.${attrTop.vendor}`)}</span>
-        ) : null}
+        {final !== null && (
+          <span className={css.chipMode} data-attr={gradeAttr(final.grade)}>{vendorLabelOf(final, t)}</span>
+        )}
       </button>
 
       {/* Expanded card layer (clipped by the morphing root while it grows). */}
@@ -389,6 +507,9 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
           t={t}
           stats={stats}
           sessionId={snap.sessionId}
+          channels={channels}
+          final={final}
+          agree={agree}
           actions={actions}
           loading={snap.loading}
           historyState={historyState}
@@ -399,7 +520,9 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
             stored: fertStored,
             error: fertError,
             interrupted: fertInterrupted,
+            retryFailed: fertRetryFailed,
             run: () => { void runFertility() },
+            retry: () => { void retryFertilityOutliers() },
           }}
           batch={{
             running: batchRunning,
@@ -407,6 +530,7 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
             stored: batchStored,
             error: batchError,
             run: () => { void runAllTests() },
+            runQuick: () => { void runQuickTests() },
           }}
           cleanup={{
             busy: cleanupBusy,
@@ -414,6 +538,8 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
             count: cleanupCount,
             run: () => { void runCleanup() },
           }}
+          parallelism={parallelism}
+          onParallelism={setParallelism}
         />
       </div>
     </div>
@@ -428,7 +554,10 @@ interface FertState {
   error: string
   /** Interrupted run detected at mount — resumable via run(). */
   interrupted: { startedAt: string; done: number; total: number } | null
+  /** A drift re-run was tried and did not clear the drift flag. */
+  retryFailed: boolean
   run: () => void
+  retry: () => void
 }
 
 /** Batch-run state owned by the stable panel root (survives session switches). */
@@ -438,6 +567,7 @@ interface BatchState {
   stored: StoredBatch | null
   error: string
   run: () => void
+  runQuick: () => void
 }
 
 /**
@@ -458,13 +588,16 @@ interface CleanupState {
   run: () => void
 }
 
-/** Expanded card body. */
+/** Expanded card body. Sections render in the ranked channel order. */
 function PanelCard({
   open,
   onToggle,
   t,
   stats,
   sessionId,
+  channels,
+  final,
+  agree,
   actions,
   loading,
   historyState,
@@ -472,12 +605,17 @@ function PanelCard({
   fert,
   batch,
   cleanup,
+  parallelism,
+  onParallelism,
 }: {
   open: boolean
   onToggle: () => void
   t: ModelTesterPanelProps['t']
   stats: TrajectoryStats | null
   sessionId: string | undefined
+  channels: readonly ChannelResult[]
+  final: ChannelResult | null
+  agree: number
   actions?: ModelTesterActions
   loading: boolean
   historyState: HistoryState
@@ -485,6 +623,8 @@ function PanelCard({
   fert: FertState
   batch: BatchState
   cleanup: CleanupState
+  parallelism: number
+  onParallelism: (value: number) => void
 }) {
   return (
     <>
@@ -508,23 +648,79 @@ function PanelCard({
           <p className={css.empty}>{t('panel.noSession')}</p>
         ) : (
           <>
+            <VerdictSummary verdict={final} agree={agree} t={t} />
             <StatusRow stats={stats} loading={loading} historyState={historyState} t={t} />
             {(historyState === 'limited' || historyState === 'error') && (
               <HistoryNotice state={historyState} pages={historyPages} t={t} />
             )}
-            <AttributionSection stats={stats} sessionId={sessionId} t={t} />
-            <ProbesSection
-              t={t}
-              actions={actions}
-              fert={fert}
-              batch={batch}
-              cleanup={cleanup}
-            />
+            {/* Channels ranked by confidence: resultless ones sink in the
+                standing order fertility → batch → lexicon. */}
+            {channels.map(channel => {
+              if (channel.channel === 'fertility') {
+                return <FertilitySection key="fertility" fert={fert} actions={actions} t={t} />
+              }
+              if (channel.channel === 'batch') {
+                return (
+                  <ProbesSection
+                    key="batch"
+                    batch={batch}
+                    fert={fert}
+                    cleanup={cleanup}
+                    actions={actions}
+                    t={t}
+                    parallelism={parallelism}
+                    onParallelism={onParallelism}
+                  />
+                )
+              }
+              return <AttributionSection key="lexicon" stats={stats} sessionId={sessionId} t={t} />
+            })}
             {stats.anomaly !== 'none' && <ReasoningAlert stats={stats} t={t} />}
           </>
         )}
       </div>
     </>
+  )
+}
+
+/** The headline verdict: the strongest channel's result, agreement noted. */
+function VerdictSummary({ verdict, agree, t }: {
+  verdict: ChannelResult | null
+  agree: number
+  t: ModelTesterPanelProps['t']
+}) {
+  if (verdict === null) {
+    return (
+      <section className={css.section} data-attr="none">
+        <div className={css.modeRow}>
+          <h3 className={css.modeLabel}>{t('attr.verdict.title')}</h3>
+          <span className={css.attrBadge} data-attr="none">{t('attr.verdict.none')}</span>
+        </div>
+        <p className={css.empty}>{t('attr.verdict.emptyHint')}</p>
+      </section>
+    )
+  }
+  const strong = gradeAttr(verdict.grade) === 'likely'
+  return (
+    <section className={css.section} data-attr={gradeAttr(verdict.grade)}>
+      <div className={css.modeRow}>
+        <h3 className={css.modeLabel}>{t('attr.verdict.title')}</h3>
+        <span className={css.attrBadge} data-attr={gradeAttr(verdict.grade)}>{t(GRADE_KEY[verdict.grade])}</span>
+      </div>
+      <div className={css.candidate} data-attr={gradeAttr(verdict.grade)}>
+        <div className={css.candidateHead}>
+          <span className={css.candidateName}>{vendorLabelOf(verdict, t)}</span>
+          <span className={css.candidateScore}>
+            <b>{Math.round(verdict.confidence * 100)}%</b>
+            {' · '}{t('attr.verdict.via')} {t(`attr.channel.${verdict.channel}`)}
+            {agree > 1 ? ` · ${t('attr.verdict.agree').replace('{n}', String(agree))}` : ''}
+          </span>
+        </div>
+        <div className={css.confidenceBar} aria-hidden="true">
+          <span style={{ width: `${Math.max(4, Math.round(verdict.confidence * 100))}%` }} />
+        </div>
+      </div>
+    </section>
   )
 }
 
@@ -648,7 +844,7 @@ function AttributionSection({ stats, sessionId, t }: {
   return (
     <section className={css.section} data-attr={attr.verdict}>
       <div className={css.modeRow}>
-        <h3 className={css.modeLabel}>{t('attr.label')}</h3>
+        <h3 className={css.modeLabel}>{t('attr.channel.lexicon')}</h3>
         <span className={css.attrBadge} data-attr={attr.verdict}>
           {t(`attr.${attr.verdict}`)}
         </span>
@@ -746,58 +942,47 @@ function EvidenceRow({ entry, t }: { entry: AttributionEvidence; t: ModelTesterP
 }
 
 /**
- * Probe kit + batch runner. When the host face supports `runBatch`, the
- * section offers the one-click FULL battery — every registered test item
- * (all standard probes plus the fertility sequence, including anything added
- * later) — with both verdict cards; results persist across reloads. Without
- * the batch face, rows keep the per-probe send/copy fallback.
+ * Probe-kit channel card. The batch verdict (if any) leads; the run control
+ * and the probe checklist follow. The usage-fingerprint button lives on its
+ * own channel card; the full battery covers both channels.
  */
-function ProbesSection({ t, actions, fert, batch, cleanup }: {
+function ProbesSection({ t, actions, fert, batch, cleanup, parallelism, onParallelism }: {
   t: ModelTesterPanelProps['t']
   actions?: ModelTesterActions
   fert: FertState
   batch: BatchState
   cleanup: CleanupState
+  parallelism: number
+  onParallelism: (value: number) => void
 }) {
   const probes = useMemo(() => orderedProbes(), [])
   const canBatch = typeof actions?.runBatch === 'function'
   const canFertility = typeof actions?.runFertility === 'function'
-  const canSend = typeof actions?.sendProbe === 'function'
+  const result = batchChannel(batch.stored)
   const trackedSessions = useMemo(() => loadTestSessions().length, [])
   const batteryTokens = useMemo(() => {
     const prompts = [...PROBES.map(p => p.prompt), ...FERTILITY_TEXTS.map(t => t.text)]
     return prompts.reduce((sum, prompt) => sum + estimateTokens(prompt), 0)
   }, [])
+  const quickTokens = useMemo(
+    () => PROBES.filter(p => p.confidence === 3).reduce((sum, probe) => sum + estimateTokens(probe.prompt), 0),
+    [],
+  )
 
   return (
     <section className={css.section}>
       <div className={css.modeRow}>
-        <h3 className={css.modeLabel}>{t('attr.probes')}</h3>
-        <span className={css.attrBadge}>{t('attr.probesHint')}</span>
+        <h3 className={css.modeLabel}>{t('attr.channel.batch')}</h3>
+        <span className={css.attrBadge} data-attr={gradeAttr(result.grade)}>{t(GRADE_KEY[result.grade])}</span>
       </div>
+      {batch.stored !== null ? (
+        <BatchBody stored={batch.stored} t={t} />
+      ) : (
+        <p className={css.empty}>{t('attr.batch.unrunHint')}</p>
+      )}
       {(canBatch || canFertility) && (
         <div className={css.batchBar}>
-          {fert.interrupted !== null && !fert.running && (
-            <span className={css.attrBadge}>
-              {t('attr.fertility.interrupted')
-                .replace('{done}', String(fert.interrupted.done))
-                .replace('{total}', String(fert.interrupted.total))}
-            </span>
-          )}
           <span className={css.batchTokens}>≈{formatCount(batteryTokens)} tok</span>
-          <button
-            type="button"
-            className={css.probeBtn}
-            disabled={fert.running || !canFertility}
-            title={fert.interrupted !== null ? t('attr.fertility.resumeNote') : t('attr.fertility.note')}
-            onClick={fert.run}
-          >
-            {fert.running
-              ? t('attr.batch.running')
-              : fert.interrupted !== null
-                ? t('attr.fertility.resume')
-                : t('attr.fertility.run')}
-          </button>
           <button
             type="button"
             className={css.probeBtn}
@@ -807,6 +992,34 @@ function ProbesSection({ t, actions, fert, batch, cleanup }: {
           >
             {batch.running || fert.running ? t('attr.batch.running') : t('attr.batch.run')}
           </button>
+          <button
+            type="button"
+            className={css.probeBtn}
+            disabled={batch.running || fert.running || !canBatch}
+            title={t('attr.batch.quickNote')}
+            onClick={batch.runQuick}
+          >
+            {t('attr.batch.quick')}
+          </button>
+        </div>
+      )}
+      {canBatch && (
+        <div className={css.batchBar}>
+          <span className={css.batchTokens}>
+            {t('attr.batch.parallel')} ≈{formatCount(quickTokens)} tok
+          </span>
+          <select
+            className={css.parallelSelect}
+            value={parallelism}
+            disabled={batch.running || fert.running}
+            title={t('attr.batch.parallelNote')}
+            onChange={event => onParallelism(Number(event.target.value))}
+            aria-label={t('attr.batch.parallel')}
+          >
+            {[1, 2, 3, 4, 6, 8].map(value => (
+              <option key={value} value={value}>{value}</option>
+            ))}
+          </select>
         </div>
       )}
       {canBatch && batch.running && (
@@ -827,14 +1040,6 @@ function ProbesSection({ t, actions, fert, batch, cleanup }: {
         ))}
       </div>
       {batch.error !== '' && <p className={css.empty}>{t('attr.batch.unavailable')}</p>}
-      {fert.running && (
-        <p className={css.empty}>
-          {t('attr.fertility.progress')} {Object.values(fert.status).filter(s => s === 'answered' || s === 'timeout').length}/{fertilitySequence().length}
-        </p>
-      )}
-      {fert.error !== '' && <p className={css.empty}>{t('attr.batch.unavailable')}</p>}
-      {fert.stored !== null && <FertilityCard stored={fert.stored} t={t} />}
-      {batch.stored !== null && <BatchGuessCard stored={batch.stored} t={t} />}
       {CLEANUP_UI_SHOWN && canBatch && (
         <div className={css.batchBar}>
           <button
@@ -909,90 +1114,161 @@ function ProbeRow({ probe, t, actions, canBatch, status }: {
   )
 }
 
-/** The fertility verdict: usage-delta fingerprint vs official tokenizers.
- *  Three honesty tiers: exact (clean run, L1 0), drift-corrected (wrapper
- *  drifted — majority residual cluster still identifies a family), and
- *  inconclusive (no call made; the ranking is shown as audit only). */
-function FertilityCard({ stored, t }: {
-  stored: StoredFertility
+/**
+ * Usage-fingerprint channel card — the panel's default detection surface.
+ * The verdict (if any) leads; the run control lives here, with the
+ * interrupted-run resume note. The grading badge and the verdict body share
+ * the honesty tiers of fertility-score.ts: exact, drift-corrected,
+ * inconclusive (audit-only ranking).
+ */
+function FertilitySection({ fert, actions, t }: {
+  fert: FertState
+  actions?: ModelTesterActions
   t: ModelTesterPanelProps['t']
 }) {
-  const verdict = stored.verdict
-  const top = verdict.candidates[0]
-  const drift = verdict.drift === true
-  const spread = verdict.wrapperSpread ?? null
-  const keyOf = (candidate: (typeof verdict.candidates)[number]): string =>
-    `${candidate.inliers}|${candidate.inlierL1}|${candidate.l1}`
-  const exact = top !== undefined && top.l1 === 0 && verdict.measured === 9 && !drift
-  const tied = top !== undefined ? verdict.candidates.filter(candidate => keyOf(candidate) === keyOf(top)) : []
-  const corrected = !exact && top !== undefined && top.inliers >= INLIER_MIN && top.inlierL1 <= INLIER_L1_MAX
-  const inconclusive = !exact && !corrected
+  const canFertility = typeof actions?.runFertility === 'function'
+  const canRetry = typeof actions?.rerunFertilityProbes === 'function'
+  const stored = fert.stored
+  const result = fertilityChannel(stored)
+  const verdict = stored?.verdict ?? null
+  const top = verdict?.candidates[0]
+  const runnerUp = verdict?.candidates[1]
+  const drift = verdict?.drift === true
+  const outliers = verdict?.outlierDims ?? []
+  const spread = verdict?.wrapperSpread ?? null
+  const running = fert.running
+    ? <p className={css.empty}>
+        {t('attr.fertility.progress')} {Object.values(fert.status).filter(s => s === 'answered' || s === 'timeout').length}/{fertilitySequence().length}
+      </p>
+    : null
+  // Resolution-limit honesty: when the top two land on a twin group or a
+  // pair the corrected gate cannot separate, say so instead of a clean win.
+  const ambiguous = top !== undefined && runnerUp !== undefined
+    && (fertilityTwinPair(top.family.id, runnerUp.family.id)
+      || fertilityConfusablePair(top.family.id, runnerUp.family.id))
   return (
-    <div className={css.batchGuess} data-confidence={exact ? 'high' : corrected ? 'medium' : 'low'}>
+    <section className={css.section}>
       <div className={css.modeRow}>
-        <h3 className={css.modeLabel}>{t('attr.fertility.card')}</h3>
-        <span className={css.attrBadge}>{t('attr.fertility.coverage')} {verdict.measured}/9</span>
+        <h3 className={css.modeLabel}>{t('attr.channel.fertility')}</h3>
+        <span className={css.attrBadge} data-attr={gradeAttr(result.grade)}>{t(GRADE_KEY[result.grade])}</span>
       </div>
-      {!verdict.usable || top === undefined ? (
-        <p className={css.empty}>{t('attr.fertility.incomplete')}</p>
-      ) : (
+      {fert.interrupted !== null && !running && (
+        <p className={css.leakFacts}>
+          {t('attr.fertility.interrupted')
+            .replace('{done}', String(fert.interrupted.done))
+            .replace('{total}', String(fert.interrupted.total))}
+        </p>
+      )}
+      {running}
+      {fert.error !== '' && <p className={css.empty}>{t('attr.batch.unavailable')}</p>}
+      {stored === null ? (
         <>
-          {inconclusive ? (
-            <p className={css.empty}>{t('attr.fertility.inconclusive')}</p>
-          ) : (
-            <div className={css.candidate} data-attr={exact ? 'likely' : 'possible'}>
-              <div className={css.candidateHead}>
-                <span className={css.candidateName}>
-                  {tied.length > 1
-                    ? tied.map(candidate => t(`vendor.${candidate.family.vendor}`)).join(' / ')
-                    : t(`vendor.${top.family.vendor}`)}
-                </span>
-                <span className={css.candidateScore}>
-                  {exact
-                    ? <>L1 <b>{top.l1}</b> · {t('attr.fertility.exact')}{tied.length > 1 ? ` · ${t('attr.fertility.pair')}` : ''}</>
-                    : <>{t('attr.fertility.inliers')} <b>{top.inliers}</b>/{verdict.measured} · L1 {top.inlierL1} · {t('attr.fertility.corrected')}</>}
-                </span>
-              </div>
-              <div className={css.candidateEvidence}>
-                {verdict.candidates.slice(0, 3).map(candidate => (
-                  <span className={css.patternItem} key={candidate.family.id} title={candidate.family.model}>
-                    <span className={css.patternKey}>{t(`vendor.${candidate.family.vendor}`)}</span>
-                    <span className={css.patternCount}>L1 {candidate.l1}</span>
-                  </span>
-                ))}
-              </div>
-            </div>
+          <p className={css.empty}>{t('attr.fertility.unmeasuredHint')}</p>
+          {canFertility && !running && (
+            <button
+              type="button"
+              className={css.probeBtn}
+              title={fert.interrupted !== null ? t('attr.fertility.resumeNote') : t('attr.fertility.note')}
+              onClick={fert.run}
+            >
+              {fert.interrupted !== null ? t('attr.fertility.resume') : t('attr.fertility.run')}
+            </button>
           )}
+        </>
+      ) : verdict === null || !verdict.usable || top === undefined ? (
+        <p className={css.empty}>{t('attr.fertility.incomplete')}</p>
+      ) : gradeAttr(result.grade) === 'none' ? (
+        <>
+          <p className={css.empty}>{t('attr.fertility.inconclusive')}</p>
+          <div className={css.candidateEvidence}>
+            {verdict.candidates.slice(0, 3).map(candidate => (
+              <span className={css.patternItem} key={candidate.family.id} title={candidate.family.model}>
+                <span className={css.patternKey}>{t(`vendor.${candidate.family.vendor}`)}</span>
+                <span className={css.patternCount}>L1 {candidate.l1}</span>
+              </span>
+            ))}
+          </div>
+        </>
+      ) : (
+        <div className={css.candidate} data-attr={gradeAttr(result.grade)}>
+          <div className={css.candidateHead}>
+            <span className={css.candidateName}>
+              {result.tied.length > 1
+                ? result.tied.map(vendor => t(`vendor.${vendor}`)).join(' / ')
+                : t(`vendor.${top.family.vendor}`)}
+            </span>
+            <span className={css.candidateScore}>
+              {result.grade === 'exact'
+                ? <>L1 <b>{top.l1}</b> · {t('attr.fertility.exact')}{result.tied.length > 1 ? ` · ${t('attr.fertility.pair')}` : ''}</>
+                : <>{t('attr.fertility.inliers')} <b>{top.inliers}</b>/{verdict.measured} · L1 {top.inlierL1} · {t('attr.fertility.corrected')}</>}
+            </span>
+          </div>
+          <div className={css.candidateEvidence}>
+            {verdict.candidates.slice(0, 3).map(candidate => (
+              <span className={css.patternItem} key={candidate.family.id} title={candidate.family.model}>
+                <span className={css.patternKey}>{t(`vendor.${candidate.family.vendor}`)}</span>
+                <span className={css.patternCount}>L1 {candidate.l1}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+      {stored !== null && verdict !== null && (
+        <>
           {drift && spread !== null && (
             <p className={css.leakFacts}>
               {t('attr.fertility.drift')
                 .replace('{spread}', String(spread))
-                .replace('{inliers}', String(top.inliers))
+                .replace('{inliers}', String(top?.inliers ?? 0))
                 .replace('{measured}', String(verdict.measured))}
+            </p>
+          )}
+          {drift && outliers.length > 0 && canRetry && !running && (
+            <div className={css.batchBar}>
+              <span className={css.batchTokens}>
+                {t('attr.fertility.outliers')} {outliers.join(' ')}
+              </span>
+              <button
+                type="button"
+                className={css.probeBtn}
+                title={t('attr.fertility.retryNote')}
+                onClick={fert.retry}
+              >
+                {t('attr.fertility.retry')}
+              </button>
+            </div>
+          )}
+          {fert.retryFailed && (
+            <p className={css.leakFacts}>{t('attr.fertility.retryFail')}</p>
+          )}
+          {ambiguous && runnerUp !== undefined && top !== undefined && (
+            <p className={css.leakFacts}>
+              {t('attr.fertility.nearPair')
+                .replace('{a}', t(`vendor.${top.family.vendor}`))
+                .replace('{b}', t(`vendor.${runnerUp.family.vendor}`))}
             </p>
           )}
           {verdict.wrapperBaseline !== null && (
             <p className={css.leakFacts}>{t('attr.fertility.wrapper')} {verdict.wrapperBaseline}</p>
           )}
-          <p className={css.leakFacts}>{t('attr.fertility.measuredAt')} {new Date(stored.at).toLocaleString()}</p>
+          <p className={css.leakFacts}>
+            {t('attr.fertility.coverage')} {verdict.measured}/9
+            {' · '}{t('attr.fertility.measuredAt')} {new Date(stored.at).toLocaleString()}
+          </p>
         </>
       )}
-    </div>
+    </section>
   )
 }
 
-/** The batch aggregate: ranked guess + confidence + coverage + elicited tokens. */
-function BatchGuessCard({ stored, t }: {
+/** The probe-kit verdict body: ranked guess + confidence + elicited tokens. */
+function BatchBody({ stored, t }: {
   stored: StoredBatch
   t: ModelTesterPanelProps['t']
 }) {
   const { guess, claims, coverage, at } = stored
   return (
-    <div className={css.batchGuess} data-confidence={guess.confidence}>
-      <div className={css.modeRow}>
-        <h3 className={css.modeLabel}>{t('attr.batch.guess')}</h3>
-        <span className={css.attrBadge}>{coverage.answered}/{coverage.total} {t('attr.batch.answeredCount')}</span>
-      </div>
+    <div className={css.batchGuess}>
       {guess.vendor === null ? (
         <p className={css.empty}>{t('attr.batch.noGuess')}</p>
       ) : (
@@ -1022,9 +1298,12 @@ function BatchGuessCard({ stored, t }: {
               ))}
             </p>
           )}
-          <p className={css.leakFacts}>{t('attr.batch.measuredAt')} {new Date(at).toLocaleString()}</p>
         </div>
       )}
+      <p className={css.leakFacts}>
+        {coverage.answered}/{coverage.total} {t('attr.batch.answeredCount')}
+        {' · '}{t('attr.batch.measuredAt')} {new Date(at).toLocaleString()}
+      </p>
     </div>
   )
 }

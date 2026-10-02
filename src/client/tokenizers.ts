@@ -1,20 +1,24 @@
 /**
  * Tokenizer feature sets: distinctive special tokens pulled from the vendors'
- * official `tokenizer_config.json` / chat templates — LATEST generation of
- * each family, re-captured from HuggingFace on 2026-09-26 (raw captures live
- * in `.attr-corpus/tokenizers/`; the offline L1 corpus in
- * `.attr-corpus/tokenizers-json/` is refreshed to the same generation, stale
- * files removed).
+ * official `tokenizer_config.json` / chat templates — latest open generation
+ * of each family, re-captured from HuggingFace (2026-09-26 refresh; 2026-10-02
+ * refresh added ByteDance Seed / AI2 OLMo / IBM Granite / TII Falcon / Baidu
+ * ERNIE / LG EXAONE and re-based Yi onto Yi-1.5; raw captures live in
+ * `.attr-corpus/tokenizers/`; the offline L1 corpus in
+ * `.attr-corpus/tokenizers-json/` is refreshed to the same generations, 25
+ * families total).
  *
- * These lists power the template-recognition probe and document what the
- * `tmpl-*` attribution rows match against. Closed vendors without published
- * tokenizers are covered differently: Anthropic by the antml artifact rows,
- * OpenAI by the `fp_…` / glitch-battery rows, xAI and NVIDIA by catalog /
- * vocab-size / behavioral layers (Nemotron's specials are reserved
- * placeholders only — a Llama-3 derivative, nothing distinctive to match).
- * Moonshot's K3 tokenizer is tiktoken-format (no tokenizer.json), InternLM
- * ships vocab.json + domain .model files — both are absent from the offline
- * L1 corpus by necessity, not omission.
+ * Vendors whose token lists are entirely shared with other families carry no
+ * set here (their identity resolves through the usage fingerprint): Baichuan
+ * and Skywork (Qwen-derived vocab, MiMo-vector twins) and Hunyuan and
+ * MiniCPM (no distinctive specials in their official configs). Closed vendors
+ * without published tokenizers are covered differently: Anthropic by the
+ * antml artifact rows, OpenAI by the `fp_…` / glitch-battery rows, xAI and
+ * NVIDIA by catalog / vocab-size / behavioral layers (Nemotron's specials are
+ * reserved placeholders only — a Llama-3 derivative, nothing distinctive to
+ * match). Moonshot's K3 tokenizer is tiktoken-format (no tokenizer.json),
+ * InternLM ships vocab.json + domain .model files — both are absent from the
+ * offline L1 corpus by necessity, not omission.
  */
 
 import type { Vendor } from './attribution-signals.ts'
@@ -95,8 +99,8 @@ export const TOKENIZER_FEATURE_SETS: readonly TokenizerFeatureSet[] = [
   },
   {
     vendor: 'yi',
-    model: 'Yi-34B-Chat (vocab 64000)',
-    source: '01-ai/Yi-34B-Chat',
+    model: 'Yi-1.5-34B-Chat (vocab 64000 — 01.AI latest open-vocab generation)',
+    source: '01-ai/Yi-1.5-34B-Chat',
     tokens: ['<|im_sep|>', '<|startoftext|>'],
   },
   {
@@ -122,5 +126,41 @@ export const TOKENIZER_FEATURE_SETS: readonly TokenizerFeatureSet[] = [
     model: 'Ling-mini-2.0 (vocab 157184)',
     source: 'inclusionAI/Ling-mini-2.0',
     tokens: ['<|role_end|>', '<role>', '<function-name>', '<args-json-object>'],
+  },
+  {
+    vendor: 'bytedance',
+    model: 'Seed-OSS-36B-Instruct (vocab 155121)',
+    source: 'ByteDance-Seed/Seed-OSS-36B-Instruct',
+    tokens: ['<seed:bos>', '<seed:think>', '</seed:think>', '<seed:tool_call>', '</seed:tool_call>', '<seed:cot_budget_reflect>'],
+  },
+  {
+    vendor: 'ai2',
+    model: 'OLMo-3-32B (vocab 100278 — vector twin of Phi-4/Granite-4)',
+    source: 'allenai/Olmo-3-32B-Think',
+    tokens: ['|||PHONE_NUMBER|||', '|||EMAIL_ADDRESS|||', '|||IP_ADDRESS|||', '<|endofprompt|>'],
+  },
+  {
+    vendor: 'ibm',
+    model: 'Granite-4.0-h-small (vocab 100352 — vector twin of Phi-4/OLMo-3)',
+    source: 'ibm-granite/granite-4.0-h-small',
+    tokens: ['<|start_of_role|>', '<|end_of_role|>', '<|start_of_plugin|>', '<|end_of_plugin|>', '<think_on>', '<think_off>'],
+  },
+  {
+    vendor: 'tii',
+    model: 'Falcon-H1-34B-Instruct (vocab 261120)',
+    source: 'tiiuae/Falcon-H1-34B-Instruct',
+    tokens: ['>>TITLE<<', '>>ABSTRACT<<', '>>INTRODUCTION<<', '>>SUMMARY<<', '>>QUESTION<<', '>>ANSWER<<', '>>DOMAIN<<'],
+  },
+  {
+    vendor: 'baidu',
+    model: 'ERNIE-4.5-21B-A3B (vocab 100295)',
+    source: 'baidu/ERNIE-4.5-21B-A3B-PT',
+    tokens: ['<|IMAGE_PLACEHOLDER|>', '<|AUDIO_PLACEHOLDER|>', '<|LOC_0|>'],
+  },
+  {
+    vendor: 'lg',
+    model: 'EXAONE-4.0.1-32B (vocab 102400)',
+    source: 'LGAI-EXAONE/EXAONE-4.0.1-32B',
+    tokens: ['[|endofturn|]', '[|assistant|]', '[|user|]', '[|system|]', '[|tool|]', 'PI:URL', 'PI:EMAIL'],
   },
 ]

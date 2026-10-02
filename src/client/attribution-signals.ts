@@ -30,12 +30,14 @@ const DIRTY_PATTERNS: readonly { id: string; pattern: RegExp }[] = [
 ]
 
 /** Version of the attribution table and scoring rules. */
-export const ATTRIBUTION_VERSION = 10 as const
+export const ATTRIBUTION_VERSION = 11 as const
 
 /** Vendor families the evidence table can support. */
 export type Vendor =
   | 'deepseek' | 'anthropic' | 'openai' | 'google' | 'qwen' | 'zhipu' | 'moonshot' | 'minimax'
-  | 'xiaomi' | 'meituan' | 'internlm' | 'step' | 'yi' | 'meta' | 'mistral' | 'nvidia' | 'xai' | 'ling'
+  | 'xiaomi' | 'baichuan' | 'skywork' | 'meituan' | 'internlm' | 'step' | 'yi' | 'meta' | 'mistral'
+  | 'nvidia' | 'xai' | 'ling' | 'baidu' | 'tencent' | 'bytedance' | 'openbmb' | 'microsoft' | 'ai2'
+  | 'ibm' | 'tii' | 'lg'
 
 /** Stable union of every signal id (scanned + derived) — also the locale key suffix. */
 export type SignalId =
@@ -46,11 +48,13 @@ export type SignalId =
   | 'tmpl-minimax' | 'tmpl-kimi' | 'tmpl-glm' | 'tmpl-glm-roles' | 'tmpl-deepseek' | 'tmpl-llama' | 'tmpl-mistral-tools'
   | 'tmpl-inst' | 'tmpl-chatml' | 'tmpl-qwen' | 'tmpl-gemma' | 'tmpl-ling'
   | 'tmpl-xiaomi' | 'tmpl-meituan' | 'tmpl-internlm' | 'tmpl-step' | 'tmpl-yi'
+  | 'tmpl-seed' | 'tmpl-olmo' | 'tmpl-granite' | 'tmpl-falcon' | 'tmpl-ernie' | 'tmpl-exaone' | 'tmpl-endofprompt'
 
 /** Display order (also the tiebreak for equal scores). */
 export const VENDORS: readonly Vendor[] = [
   'deepseek', 'anthropic', 'openai', 'google', 'qwen', 'zhipu', 'moonshot', 'minimax',
-  'xiaomi', 'meituan', 'internlm', 'step', 'yi', 'meta', 'mistral', 'nvidia', 'xai', 'ling',
+  'xiaomi', 'baichuan', 'skywork', 'meituan', 'internlm', 'step', 'yi', 'meta', 'mistral', 'nvidia', 'xai', 'ling',
+  'baidu', 'tencent', 'bytedance', 'openbmb', 'microsoft', 'ai2', 'ibm', 'tii', 'lg',
 ]
 
 /** Evidence strength class. */
@@ -96,6 +100,8 @@ export const PROBE_CONTEXT_SENTINEL = 'MT-CTXWIN-a1f86d'
 export const PROBE_IDENTITY_SENTINEL = 'MT-IDENT-58b2c4'
 /** Sentinel for the system-prompt extraction probe. */
 export const PROBE_SYS_PROMPT_SENTINEL = 'MT-SYSPRM-3c9e77'
+/** Sentinel for the family-canary echo battery. */
+export const PROBE_CANARY_SENTINEL = 'MT-CANARY-9d4f12'
 
 /** Clone a pattern with the global flag for match counting. */
 function globalize(pattern: RegExp): RegExp {
@@ -298,8 +304,64 @@ const templateSignals: readonly AttributionSignal[] = [
     kind: 'template',
     tier: 1,
     match: [/<\|im_sep\|>/g, /<\|startoftext\|>/g],
-    vendors: { yi: 5 },
-    rationale: 'Yi-34B-Chat tokens (official tokenizer_config): <|im_sep|> is Yi-unique in the ChatML family; <|startoftext|> also appeared in Ling-1T-era configs, so weight 5 not 6.',
+    vendors: { yi: 3, microsoft: 3 },
+    rationale: '<|im_sep|> from the official configs: Yi-unique in the ChatML family until Phi-4 adopted the same token (2026-10 refresh), so the row now supports both at half weight; <|startoftext|> is Yi-era only. Phi\'s own shared <|endofprompt|> lives in tmpl-endofprompt.',
+  },
+  {
+    id: 'tmpl-seed',
+    kind: 'template',
+    tier: 1,
+    match: [/<seed:bos>/g, /<seed:think>/g, /<\/seed:think>/g, /<seed:tool_call>/g, /<\/seed:tool_call>/g, /<seed:cot_budget_reflect>/g, /<\/seed:cot_budget_reflect>/g],
+    vendors: { bytedance: 6 },
+    rationale: 'ByteDance Seed-OSS vendor namespace (<seed:*> from the official tokenizer_config, captured 2026-10-02) — a complete think/tool_call/cot-budget dialect no other family uses.',
+  },
+  {
+    id: 'tmpl-olmo',
+    kind: 'template',
+    tier: 1,
+    match: [/\|\|\|PHONE_NUMBER\|\|\|/g, /\|\|\|EMAIL_ADDRESS\|\|\|/g, /\|\|\|IP_ADDRESS\|\|\|/g],
+    vendors: { ai2: 6 },
+    rationale: 'OLMo\'s |||…||| PII redaction markers from the official tokenizer_config (captured 2026-10-02) — a redaction-pipeline artifact unique to the dolma tokenizer lineage.',
+  },
+  {
+    id: 'tmpl-granite',
+    kind: 'template',
+    tier: 1,
+    match: [/<\|start_of_role\|>/g, /<\|end_of_role\|>/g, /<\|start_of_plugin\|>/g, /<\|end_of_plugin\|>/g, /<think_on>/g, /<think_off>/g],
+    vendors: { ibm: 6 },
+    rationale: 'Granite-4 role/plugin frame and think_on/think_off controls from the official tokenizer_config (captured 2026-10-02) — a role-dialect distinct from the Llama header style.',
+  },
+  {
+    id: 'tmpl-falcon',
+    kind: 'template',
+    tier: 1,
+    match: [/>>TITLE<</g, />>ABSTRACT<</g, />>INTRODUCTION<</g, />>SUMMARY<</g, />>COMMENT<</g, />>ANSWER<</g, />>QUESTION<</g, />>DOMAIN<</g],
+    vendors: { tii: 6 },
+    rationale: 'Falcon-H1\'s >>MARKER<< document-control tokens from the official tokenizer_config (captured 2026-10-02) — an angle-bracket-free dialect unique to the Rift lineage; the >>UNUSED_n<< placeholders are excluded.',
+  },
+  {
+    id: 'tmpl-ernie',
+    kind: 'template',
+    tier: 1,
+    match: [/<\|IMAGE_PLACEHOLDER\|>/g, /<\|AUDIO_PLACEHOLDER\|>/g, /<\|LOC_\d+\|>/g],
+    vendors: { baidu: 6 },
+    rationale: 'ERNIE-4.5 UPPER_SNAKE placeholder block (<|IMAGE/AUDIO_PLACEHOLDER|>, <|LOC_n|>) from the official tokenizer_config (captured 2026-10-02) — uppercase-named controls no other family carries.',
+  },
+  {
+    id: 'tmpl-exaone',
+    kind: 'template',
+    tier: 1,
+    match: [/\[\|endofturn\|\]/g, /\[\|assistant\|\]/g, /\[\|user\|\]/g, /\[\|system\|\]/g, /\[\|tool\|\]/g, /\bPI:(URL|EMAIL|KEY|ID|USER|PHONE_NUM|ACCOUNT_NUM|IP_ADDRESS|BUSINESS_NUM|ANNON)\b/g],
+    vendors: { lg: 6 },
+    rationale: 'EXAONE-4.0 bracket-role frame ([|user|] … [|endofturn|]) and PI: redaction markers from the official tokenizer_config (captured 2026-10-02) — a bracket-role dialect opposite to the <|pipe|> style.',
+  },
+  {
+    id: 'tmpl-endofprompt',
+    kind: 'template',
+    tier: 2,
+    match: [/<\|endofprompt\|>/g],
+    vendors: { microsoft: 3, ai2: 3 },
+    rationale: '<|endofprompt|> is shared by the 100k-vocab cluster (Phi-4 and OLMo-3 both carry it; captured 2026-10-02), so it supports both at support-only weight — the vectors separate them quantitatively.',
   },
   {
     id: 'tmpl-xiaomi',

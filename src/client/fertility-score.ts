@@ -109,6 +109,14 @@ export interface FertilityVerdict {
   readonly wrapperSpread: number | null
   /** True when the wrapper could not be assumed constant (drift-corrected call). */
   readonly drift: boolean
+  /**
+   * Dimensions OUTSIDE the top family's majority residual cluster (T1..T9
+   * ids). These are the readings a wrapper-drift re-run should target: drift
+   * is per-session random injection, so re-measuring just the outliers in
+   * fresh sessions usually restores the clean 9/9 exact match. Empty on
+   * clean runs.
+   */
+  readonly outlierDims: readonly string[]
 }
 
 /** Fertility send order: T0 baseline, then the nine divergence dimensions. */
@@ -145,29 +153,31 @@ export function fertilityVerdictOf(turns: readonly FertilityTurn[]): FertilityVe
   })
 
   const candidates: FertilityCandidate[] = []
+  const residualDims = new Map<string, { dim: string; residual: number }[]>()
   for (const family of FERTILITY_FAMILIES) {
-    const residuals: number[] = []
+    const residuals: { dim: string; residual: number }[] = []
     let l1 = 0
     let count = 0
     for (let i = 0; i < dims.length; i++) {
       const reference = family.deltas[i]
       const value = vector[i]
       if (reference === null || value === null) continue
-      residuals.push(value - reference)
+      residuals.push({ dim: dims[i]!, residual: value - reference })
       l1 += Math.abs(value - reference)
       count += 1
     }
     if (count === 0) continue // nothing comparable for this family
-    const offset = medianOf(residuals)
+    const offset = medianOf(residuals.map(entry => entry.residual))
     let inliers = 0
     let inlierL1 = 0
-    for (const r of residuals) {
-      if (Math.abs(r - offset) <= WRAPPER_TOL) {
+    for (const { residual } of residuals) {
+      if (Math.abs(residual - offset) <= WRAPPER_TOL) {
         inliers += 1
-        inlierL1 += Math.abs(r - offset)
+        inlierL1 += Math.abs(residual - offset)
       }
     }
     candidates.push({ family, l1, dims: count, inliers, inlierL1: Math.round(inlierL1 * 10) / 10, offset })
+    residualDims.set(family.id, residuals)
   }
   candidates.sort((a, b) =>
     b.inliers - a.inliers
@@ -181,6 +191,15 @@ export function fertilityVerdictOf(turns: readonly FertilityTurn[]): FertilityVe
   const wrapperSpread = values.length >= 2 ? Math.max(...values) - Math.min(...values) : null
   const top = candidates[0]
   const drift = top !== undefined && ((wrapperSpread !== null && wrapperSpread > SPREAD_MAX) || top.inliers < top.dims)
+  // Outlier dimensions of the TOP family: the readings a targeted re-run
+  // should refresh (see FertilityVerdict.outlierDims). Empty unless the top
+  // cluster actually lost members.
+  const outlierDims: string[] = []
+  if (top !== undefined) {
+    for (const { dim, residual } of residualDims.get(top.family.id) ?? []) {
+      if (Math.abs(residual - top.offset) > WRAPPER_TOL) outlierDims.push(dim)
+    }
+  }
   return {
     candidates,
     measured: vector.filter(value => value !== null).length,
@@ -189,5 +208,6 @@ export function fertilityVerdictOf(turns: readonly FertilityTurn[]): FertilityVe
     wrapperBaseline: base ?? null,
     wrapperSpread,
     drift,
+    outlierDims,
   }
 }

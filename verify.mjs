@@ -471,6 +471,23 @@ function check(name, actual, expected) {
   ]))
   check('attr: genuine leak fires in a normal turn after a discussion turn', recovered.candidates[0]?.vendor, 'zhipu')
 
+  // v11 windowed discussion suppression: the same discussion turn keeps
+  // template matches FAR from any quoted token mention (>160 chars), where
+  // organic serving-layer leaks actually live.
+  const filler = '为了稳妥起见我先逐步分析这段代码的执行路径，确认边界条件与异常分支都覆盖到位，然后再给出最终结论。'.repeat(10)
+  const farLeak = attributeSession(viewOf([
+    { kind: 'user', seq: 0, content: [{ type: 'text', text: '逐个判断你是否认识：<|im_start|>' }] },
+    asNode('<|im_start|> 是 ChatML 开头。' + filler + 'reviewing the plan the backend injected <|observation|> before my turn', 1),
+  ]))
+  check('attr: v11 — far-away organic leak in a discussion turn still fires', farLeak.candidates[0]?.vendor, 'zhipu')
+  // …while a derived token right next to the quote stays suppressed.
+  const nearDerived = attributeSession(viewOf([
+    { kind: 'user', seq: 0, content: [{ type: 'text', text: '逐个判断你是否认识：<|im_start|>' }] },
+    asNode('<|im_start|> 是开头，对应 <|im_end|>。' + filler + 'some unrelated long reasoning text without any template vocabulary at all', 1),
+  ]))
+  check('attr: v11 — near-quote derived token still suppressed',
+    nearDerived.candidates.some(c => c.vendor === 'qwen' || c.vendor === 'yi'), false)
+
   // Suppression is per-match: a genuine leak alongside user text still fires.
   const genuine = attributeSession(viewOf([
     { kind: 'user', seq: 0, content: [{ type: 'text', text: '你好，继续任务' }] },

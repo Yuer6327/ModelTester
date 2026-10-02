@@ -7,7 +7,7 @@
 
 ModelTester 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（dsh）网页端插件：在会话页右上角挂载一块**模型检测面板**，回答一个问题——
 
-1. **当前会话像哪家模型？**（归属分析：18 家厂商候选 + 完整证据账本）
+1. **当前会话像哪家模型？**（归属分析：29 家厂商候选 + 完整证据账本）
 
 一切判定都是本地、无模型、零网络的**结构指纹匹配**，且每一条结论都附带可展开的证据与上下文样本。面板回答「像谁」，不回答「是谁」。
 
@@ -17,12 +17,12 @@ ModelTester 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harne
 
 | 层 | 回答的问题 | 实现 |
 |---|---|---|
-| **归属分析**（主视图） | 这个会话**像哪家**？ | 18 家厂商候选评分排名 + 证据账本（[`src/client/attribution.ts`](src/client/attribution.ts)） |
+| **归属分析**（主视图） | 这个会话**像哪家**？ | 29 家厂商候选评分排名 + 证据账本（[`src/client/attribution.ts`](src/client/attribution.ts)） |
 | **模板 / 分词器指纹** | 服务栈的模板与词表是哪家的？ | 各家官方 tokenizer_config 特殊 token 的 tier-1 泄漏行（[`src/client/tokenizers.ts`](src/client/tokenizers.ts)） |
 | **脏 token 与泄漏物** | 底层漏出了什么工件？ | 社区证实清单 + 通用异常探测器：未收录泄漏自动入账本，供一行入表 |
 | **推理健康诊断** | reasoning 面完整吗？ | 纯文本输出（无 reasoning 块）或 reasoning 极少时给出告警——证据面不完整时如实提示，绝不编造统计（[`src/client/stats.ts`](src/client/stats.ts)） |
-| **探针包 + 一键全量测试** | 怎么主动取证？ | 11 个探针（工具格式诱发 / 模板识别 / glitch 电池 / 回声 / 字母计数 / 知识截止 / 拒答形状（分级双语阶梯） / 上下文自述 / 自然任务 / 身份格网 / 系统提示词提取），按置信度排序；**一键测试 = 全量电池**（自动包含全部探针 + usage 指纹及未来新增测试项，逐条开新会话），跑完给出**猜测 + 置信度**、自报身份（bait 档）与 usage 指纹两张结论卡；**所有结论跨刷新保留**（localStorage 持久化 + 机制版本校验 + 测量时间戳）；另附**清理测试会话**入口（0.1.7 宿主会话面无删除 API，特性探测到位后即生效）（[`src/client/batch.ts`](src/client/batch.ts)）；旧宿主回退为逐条发送/复制 |
-| **usage 指纹**（面板内） | 分词器**定量**是哪家？ | **一键 `usage 指纹`**：T0–T9 固定文本逐条新开会话，读每轮 usage 的 prompt 侧 token，跨会话差分消掉网关包装常量，对 13 家官方 tokenizer 参照向量做 **L1 比对**（L1=0 = 精确匹配；近邻对如实并列）（[`src/client/fertility.ts`](src/client/fertility.ts)）。仓库级 drill 另含词表规模指纹、特殊 token 注入、目录泄露、错误包络、上下文天花板、同网关 A/B 与跨层综合判定（`fingerprint-drill.mjs --batch`） |
+| **探针包 + 一键全量测试** | 怎么主动取证？ | 12 个探针（工具格式诱发 / 模板识别 / glitch 电池 / 回声 / **家族 canary**（词表挖掘，见下）/ 字母计数 / 知识截止 / 拒答形状（分级双语阶梯） / 上下文自述 / 自然任务 / 身份格网 / 系统提示词提取），按置信度排序；**一键测试 = 全量电池**（自动包含全部探针 + usage 指纹及未来新增测试项），**快速电池** = 仅结构 canary 探针（1–2 分钟）；每个探针独立新会话防顺序污染（宿主装配面限制下，0.2.0-rc.2 桌面端后台会话暂采不到文本，超时项如实记 0 字符——见 [`docs/attribution-roadmap.md`](docs/attribution-roadmap.md) 2026-10-02 记录）；跑完给出**猜测 + 置信度**、自报身份（bait 档）与 usage 指纹两张结论卡；**所有结论跨刷新保留**（localStorage 持久化 + 机制版本校验 + 测量时间戳）（[`src/client/batch.ts`](src/client/batch.ts)） |
+| **usage 指纹**（面板内） | 分词器**定量**是哪家？ | **一键 `usage 指纹`**：T0–T9 固定文本逐条新开会话，读每轮 usage 的 prompt 侧 token，跨会话差分消掉网关包装常量，对 **25 家**官方 tokenizer 参照向量做 **L1 比对**（L1=0 = 精确匹配；孪生向量组如实并列，可混淆对如实提示分辨率边界）；**wrapper 漂移定向重测**——离群维度只重跑对应会话，通常可把漂移校正恢复为精确匹配（[`src/client/fertility.ts`](src/client/fertility.ts)）。仓库级 drill 另含词表规模指纹、特殊 token 注入、目录泄露、错误包络、上下文天花板、同网关 A/B 与跨层综合判定（`fingerprint-drill.mjs --batch`） |
 
 面板实时增量折叠流式输出、自动回填完整历史（≤30 页）、按会话本地持久化；不发送任何数据，不改动、不补丁宿主任何既有 UI。
 
@@ -30,7 +30,7 @@ ModelTester 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harne
 
 **判定规则**：扫描全部已加载推理文本（探针哨兵顺带扫可见回复），把命中的结构指纹按权重累到厂商候选上；同时把每条证据按层级 × 权重校准为独立概率，noisy-OR 合成 0–100% 的**置信度系数**（tier-1 结构泄漏接近必中，tier-3 轶事级每条 <12%，堆再多也难过半）——候选按系数排名，达到「匹配」需要至少一条 **tier-1** 证据、系数 ≥75% 且明显领先第二名，仅 tier-2/3 证据封顶「疑似」，只有无厂商证据时显示「未匹配」并列出泄漏物。**用户回声抑制**：用户消息里出现过的 token（探针提示词本身会列出各家特殊 token），模型思考里再复述**不算**泄漏；**讨论回合抑制**：提示词里列了模板 token 的回合（模板识别探针、用户问 token 含义），该回合推理中的模板/异常命中整体视为讨论——包括模型类推写出的派生 token（`<|im_start|>`→`<|im_end|>`、`[INST]`→`[/INST]`）——批量测试的家族扫描同理只看**可见回复**且跳过模板识别回合。探针哨兵行豁免。证据账本按信号去重（≤40 条），每条带首现轮次与 ±40 字上下文样本。
 
-证据表（`ATTRIBUTION_VERSION = 9`，[`src/client/attribution-signals.ts`](src/client/attribution-signals.ts)）分层：
+证据表（`ATTRIBUTION_VERSION = 11`，[`src/client/attribution-signals.ts`](src/client/attribution-signals.ts)）分层：
 
 | 层 | 证据 | 厂商 | 权重 |
 |---|---|---|---:|
@@ -44,7 +44,7 @@ ModelTester 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harne
 | 3 · 风格轶事/探针 | `delve` 词癖、破折号密度、探针哨兵回声 | 弱支持 | 1 |
 | 3 · 诊断行（无厂商方向） | glitch 金丝雀（r50k/cl100k 分族，见下）——退化复读指向该血统、干净复读反而排除，方向由人判，不入评分 | 未归属 | — |
 
-glitch 金丝雀清单取自公开研究：[SolidGoldMagikarp（LessWrong）](https://www.lesswrong.com/posts/aPeJE8bSo6rAFoLqg/solidgoldmagikarp-plus-prompt-generation)、[arXiv:2404.09894](https://arxiv.org/abs/2404.09894) 与 [garak 扫描器公开表](https://github.com/NVIDIA/garak/blob/main/garak/probes/glitch.py)。
+glitch 金丝雀清单取自公开研究：[SolidGoldMagikarp（LessWrong）](https://www.lesswrong.com/posts/aPeJE8bSo6rAFoLqg/solidgoldmagikarp-plus-prompt-generation)、[arXiv:2404.09894](https://arxiv.org/abs/2404.09894) 与 [garak 扫描器公开表](https://github.com/NVIDIA/garak/blob/main/garak/probes/glitch.py)。在此之上，**家族 canary**（`src/client/canaries.ts`，`node mine-canaries.mjs` 生成）从 25 家官方 tokenizer.json 挖出「仅一家词表才有的单 token」并按病态纹理排序——探针逐行请求复述，**正常复述无证据，复读退化（循环/乱码）指向拥有该 token 的家族**（`canaryEchoOf` 计分，进批量聚合）；孪生词表组（deepseek≡step、mistral≡nemotron、xiaomi≡baichuan≡skywork、phi≡granite≡olmo）天然无唯一候选，如实留空。
 
 - **模板泄漏行只扫推理**：探针**回答里引用**特殊 token 不触发归属，避免自产假阳性；**用户消息**里出现过的 token 在推理中复述同样不算（用户回声抑制），列过 token 的讨论回合整体豁免（派生 token 一并压制），探针哨兵行除外；模板识别探针仅供人工判读（末行假 token 是对照组）。
 - **置信度系数与排名**：面板每行候选显示置信度百分比与原始证据分；独立的结构证据胜过弱证据堆积，共享行（如 DeepSeek/Step 全角帧）由表内低权重体现、不再叠加。批量测试的「猜测 + 置信度」用同一系数合成引擎候选与探针诱发 token。
@@ -133,7 +133,7 @@ src/
     ├── conversation.ts # 宿主快照结构子集（跨 0.1.x 版本）
     ├── session-source.ts / session-store.ts / accumulator.ts
     ├── stats.ts        # 计数引擎（0813 轨迹词汇 + 风格统计）
-    ├── fertility.ts     # usage 指纹探针文本 + 13 家官方 tokenizer 参照向量
+    ├── fertility.ts     # usage 指纹探针文本 + 25 家官方 tokenizer 参照向量
     ├── fertility-score.ts  # 跨会话差分 + L1 家族判定
     ├── attribution.ts / attribution-signals.ts  # 归属引擎 + 证据→厂商表
     ├── tokenizers.ts   # 各家官方 tokenizer 特征集（最新代）

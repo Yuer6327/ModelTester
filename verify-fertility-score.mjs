@@ -73,6 +73,25 @@ const DS = { T0: 2, T1: 42, T2: 80, T3: 52, T4: 64, T5: 69, T6: 68, T7: 33, T8: 
   check(`hopeless: no family reaches ${INLIER_MIN} inliers (inconclusive tier)`, v.candidates[0].inliers < INLIER_MIN, true)
 }
 
+// --- 3b. Outlier dims: the targeted-retry surface ----------------------------
+{
+  // Clean run: no outliers, nothing to retry.
+  const clean = fertilityVerdictOf(turnsOf(Object.fromEntries(Object.entries(MM).map(([id, c]) => [id, 500 + c]))))
+  check('outliers: clean run has none', clean.outlierDims, [])
+  // Polluted run: the minority-wrapper sessions must be named so the runner
+  // can re-measure exactly those. The fixture has three wrapper populations —
+  // A=9617 (T0,T1,T4,T6,T9), B=9460 (T3,T7,T8), C≈2× (T2,T5) — so every
+  // non-A dim is an outlier.
+  const polluted = fertilityVerdictOf(turnsOf({ T0: 9619, T1: 9657, T2: 19359, T3: 9505, T4: 9679, T5: 19697, T6: 9685, T7: 9502, T8: 9505, T9: 9655 }))
+  check('outliers: polluted run names the drifted dims', polluted.outlierDims, ['T2', 'T3', 'T5', 'T7', 'T8'])
+  // A targeted re-draw of ALL outliers lands back on the majority wrapper
+  // (9617) → the drift flag clears and the clean 9/9 exact match returns.
+  // Repaired absolutes = 9617 + the MM reference counts.
+  const repaired = fertilityVerdictOf(turnsOf({ T0: 9619, T1: 9657, T2: 9695, T3: 9664, T4: 9679, T5: 9683, T6: 9685, T7: 9661, T8: 9664, T9: 9655 }))
+  check('outliers: after re-draw drift clears', repaired.drift, false)
+  check('outliers: after re-draw verdict is exact minimax', [repaired.candidates[0].family.id, repaired.candidates[0].l1], ['minimax-m3', 0])
+}
+
 // --- 4. Near-duplicate pair still ties on a clean run -----------------------
 {
   const W = 800
@@ -109,6 +128,7 @@ const DS = { T0: 2, T1: 42, T2: 80, T3: 52, T4: 64, T5: 69, T6: 68, T7: 33, T8: 
   check('persist: legacy record accepted', stored !== null, true)
   check('persist: legacy candidate degrades to full-inlier', [stored.verdict.candidates[0].inliers, stored.verdict.candidates[0].offset], [9, 0])
   check('persist: legacy drift defaults false', stored.verdict.drift, false)
+  check('persist: legacy outlierDims defaults empty', stored.verdict.outlierDims, [])
   check('persist: v2 shape roundtrip keeps drift', parseStoredFertility({
     at: 'x', verdict: { measured: 9, usable: true, wrapperBaseline: 502, wrapperSpread: 10496, drift: true, candidates: [{ familyId: 'minimax-m3', l1: 20155, dims: 9, inliers: 4, inlierL1: 0, offset: 0 }] },
   }).verdict.drift, true)

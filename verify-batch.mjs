@@ -6,11 +6,12 @@
  */
 import { deepEqual, ok } from 'node:assert/strict'
 
-const { batchScanText, estimateTokens, familyHitsOf, identityClaimsOf, aggregateBatch, orderedProbes, recognitionListedTokens } =
+const { batchScanText, estimateTokens, familyHitsOf, identityClaimsOf, aggregateBatch, orderedProbes, recognitionListedTokens, canaryEchoOf, batchEngineReportOf } =
   await import('./src/client/batch.ts')
 const { PROBES } = await import('./src/client/probes.ts')
 const { TOKENIZER_FEATURE_SETS } = await import('./src/client/tokenizers.ts')
 const { ALL_SIGNALS } = await import('./src/client/attribution-signals.ts')
+const { FAMILY_CANARIES } = await import('./src/client/canaries.ts')
 
 let failures = 0
 function check(name, fn) {
@@ -191,6 +192,62 @@ check('aggregateBatch: nothing fires -> none', () => {
   ok(guess.confidenceValue === 0, `coefficient ${guess.confidenceValue} should be 0`)
 })
 
+check('canaryEchoOf: degenerate repetition (≥2) points at the owning family', () => {
+  const canary = FAMILY_CANARIES.find(set => set.vendor === 'minimax')?.canaries[0]
+  ok(canary !== undefined, 'minimax must have mined canaries')
+  // Clean echo (one verbatim occurrence) is no evidence…
+  ok(canaryEchoOf([{ probeId: 'canary', text: `介绍\n${canary}\n完` }]).length === 0, 'clean echo must not fire')
+  // …a repetition loop (twice) is the SolidGoldMagikarp signature.
+  const hits = canaryEchoOf([{ probeId: 'canary', text: `${canary}\n${canary}\n${canary}` }])
+  deepEqual(hits, [{ vendor: 'minimax', tokens: [canary] }])
+})
+
+check('canaryEchoOf: only the canary probe reply counts, other families unaffected', () => {
+  const canary = FAMILY_CANARIES.find(set => set.vendor === 'minimax')?.canaries[0]
+  ok(canary !== undefined)
+  // Same string repeated in a NON-canary turn (quoted by another probe) — no hit.
+  ok(canaryEchoOf([{ probeId: 'natural', text: canary + canary }]).length === 0)
+})
+
+check('canaryEchoOf: canary strings never collide with the template scan', () => {
+  // Every canary must be absent from every family's template-token list —
+  // the two scanners read the same reply text and must not cross-fire.
+  const templateTokens = new Set(TOKENIZER_FEATURE_SETS.flatMap(set => set.tokens))
+  for (const set of FAMILY_CANARIES) {
+    for (const canary of set.canaries) {
+      ok(!templateTokens.has(canary), `canary ${JSON.stringify(canary)} collides with a template token`)
+    }
+  }
+})
+
+check('batchEngineReportOf: builds a per-probe engine report with echo context', () => {
+  const report = batchEngineReportOf([
+    {
+      probeId: 'natural',
+      prompt: '继续常规任务',
+      text: '',
+      blocks: [{ kind: 'reasoning', text: 'plan uses <|observation|> next' }],
+    },
+  ])
+  ok(report !== null, 'report must exist')
+  ok(report.candidates[0]?.vendor === 'zhipu', `top ${report.candidates[0]?.vendor}`)
+  // A quoted template token (listed by the probe prompt) must not fire.
+  const quoted = batchEngineReportOf([
+    {
+      probeId: 'template',
+      prompt: '逐个判断你是否认识：<|observation|>',
+      text: '',
+      blocks: [{ kind: 'reasoning', text: '<|observation|> 有点眼熟' }],
+    },
+  ])
+  ok(quoted !== null && quoted.candidates.length === 0, 'user-echo must be suppressed inside the synthetic view')
+})
+
+check('batchEngineReportOf: null on empty collection', () => {
+  ok(batchEngineReportOf([]) === null)
+  ok(batchEngineReportOf([{ probeId: 'natural', text: '' }]) === null)
+})
+
 check('every probe sentinel and signal id has a zh locale key', async () => {
   const { zh } = await import('./src/client/locales.ts')
   const { PROBES: probes } = await import('./src/client/probes.ts')
@@ -203,6 +260,17 @@ check('every probe sentinel and signal id has a zh locale key', async () => {
   }
   for (const signal of ALL_SIGNALS) {
     ok(`attr.signal.${signal.id}` in zh, `missing attr.signal.${signal.id}`)
+  }
+})
+
+check('every vendor has zh + en display names and a zh identity-pattern mention', async () => {
+  const { zh, en } = await import('./src/client/locales.ts')
+  const { VENDORS: vendors } = await import('./src/client/attribution-signals.ts')
+  const { IDENTITY_CLAIM_PATTERNS } = await import('./src/client/batch.ts')
+  for (const vendor of vendors) {
+    ok(`vendor.${vendor}` in zh, `missing zh vendor.${vendor}`)
+    ok(`vendor.${vendor}` in en, `missing en vendor.${vendor}`)
+    ok(IDENTITY_CLAIM_PATTERNS.some(p => p.vendor === vendor), `missing identity claim pattern for ${vendor}`)
   }
 })
 

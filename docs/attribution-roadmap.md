@@ -57,3 +57,9 @@ L1 扩容/新家族 > L2 包装常量 > L7 同网关 A/B > 审查边界电池（
 - [r/opencodeCLI: M3.1 is Space Bunny Alpha —— 7 canary 分词指纹](https://www.reddit.com/r/opencodeCLI/comments/1wpv45g/m31_is_space_bunny_alpha)
 - [r/singularity: I fingerprinted Ox Alpha —— 95 探针全中 GLM-5 tokenizer](https://www.reddit.com/r/singularity/comments/1vufbx1/i_fingerprinted_ox_alpha_same_tokenizer_as_glm53)
 - UTF: Under-Trained Tokens as Fingerprints（ACL 2025）；LLMmap（USENIX Security）；AdaptPrint（arXiv 2026-08）—— 学术线，文本提及
+
+## 2026-10-02 实机验证记录（桌面版 0.2.0-rc.2，space-bunny-free）
+
+- **usage 指纹通道全链路验证通过**：25 家参照表 + 后台并发采集 + 崩溃续跑（T0–T5 读数跨重启复用）实机跑通；结论卡给出 minimax-m3 8/9 维共识簇、offset 0、runner-up（llama/deepseek-v4，L1 181）——与社区 space-bunny = MiniMax 系定案一致；wrapper 漂移如实标记（drift=true），离群维（T9）由「定向重测」按钮给出，等一次干净重跑。
+- **批量通道文本面受宿主限制**：实测确认 `sessions.create()` 不聚焦新会话，会话装配（chat.legacy）仅为主视图会话物化——后台探针会话经 `uiConversation.binding(id)` 与 SessionFace 快照均读不到文本（20+ 次采集 0 字符；会话实际在 ~46s 内完成回复）。批量探针在宿主补上「后台装配物化」或插件拿到 uiSession 聚焦能力之前，文本采集只能在探针会话恰好位于主视图时成功；超时项如实记 0 字符，聚合宁可 none 不造假。usage projections 不受此限（fertility 并发采集正常）。
+- **背景窗口计时器节流**：遮挡/最小化窗口内 setTimeout 被节流到分钟级，纯定时轮询会瘫痪——采集等待已改为「宿主 observable 订阅唤醒 + 定时兜底」（waitTick），订阅回调不受节流影响。

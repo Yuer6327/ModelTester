@@ -107,6 +107,14 @@ const LEDGER_CAP = 40
 const COUNT_SATURATION = 3
 
 /**
+ * Discussion-window radius (chars): in a turn whose prompt listed template
+ * tokens, matches that sit this close to a quoted/derived token mention are
+ * vocabulary discussion (v9 dropped the WHOLE turn; v11 keeps far-away
+ * matches, which are where organic serving-layer leaks actually live).
+ */
+const DISCUSSION_WINDOW = 160
+
+/**
  * Confidence calibration: base probability that a row of the given tier is
  * genuine family evidence, scaled by the row's table weight (weight 6 = the
  * strongest curated rows, 1 = folklore). Deliberately conservative — tier 2
@@ -154,21 +162,31 @@ export function attributionTurnCacheFor(owner: object): WeakMap<object, NodeScan
 /**
  * Count global-regex matches and capture bounded context samples. Matches
  * whose string occurs in `echo` (the session's user/system text) are dropped:
- * a token the user pasted and the model repeats back is not a leak.
+ * a token the user pasted and the model repeats back is not a leak. `near`
+ * optionally drops matches whose START sits too close to a discussion anchor
+ * (a quoted token mention) — the windowed form of the v9 whole-turn drop.
  */
-function scanRegex(text: string, re: RegExp, samples: string[], sampleCap: number, echo: string): number {
-  const matches = text.match(re)
-  if (matches === null) return 0
+function scanRegex(
+  text: string,
+  re: RegExp,
+  samples: string[],
+  sampleCap: number,
+  echo: string,
+  near?: (start: number) => boolean,
+): number {
   let count = 0
-  for (const m of matches) {
-    if (echo !== '' && echo.includes(m)) continue
+  for (const m of text.matchAll(re)) {
+    const start = m.index ?? 0
+    if (near !== undefined && near(start)) continue
+    const match = m[0]
+    if (echo !== '' && echo.includes(match)) continue
     count += 1
     if (samples.length >= sampleCap) continue
-    const at = text.indexOf(m)
+    const at = text.indexOf(match)
     if (at < 0) continue
-    const start = Math.max(0, at - 40)
-    const end = Math.min(text.length, at + m.length + 40)
-    const snippet = text.slice(start, end).replace(/\s+/gu, ' ').trim()
+    const s = Math.max(0, at - 40)
+    const end = Math.min(text.length, at + match.length + 40)
+    const snippet = text.slice(s, end).replace(/\s+/gu, ' ').trim()
     if (snippet !== '') samples.push(snippet)
   }
   return count
@@ -208,12 +226,13 @@ function visibleText(blocks: readonly AssistantBlockView[]): string {
  * Scan one assistant node's blocks for every table row. `echo` is the
  * session's user/system text: non-probe matches whose string appears in it
  * are dropped (user-echo suppression). `discussion` marks a turn whose own
- * prompt listed template tokens (the recognition probe, or a user asking
- * about a token): every template/anomaly match in such a turn's reasoning is
- * vocabulary discussion — including *derived* tokens the model only wrote by
- * analogy (`<|im_start|>` → `<|im_end|>`, `[INST]` → `[/INST]`) — and is
- * dropped wholesale. Probe rows are always exempt: their sentinels are
- * embedded in the prompt by design.
+ * prompt listed template tokens: template/anomaly matches that sit within
+ * DISCUSSION_WINDOW of a quoted token mention in the reasoning are vocabulary
+ * discussion — quoted OR derived by analogy (`<|im_start|>` → `<|im_end|>`,
+ * `[INST]` → `[/INST]`) — and are dropped; matches far from any mention are
+ * kept (v11: the v9 whole-turn drop over-suppressed organic leaks that share
+ * a turn with a discussion). Probe rows are always exempt: their sentinels
+ * are embedded in the prompt by design.
  */
 export function scanNode(
   blocks: readonly AssistantBlockView[],
@@ -227,6 +246,12 @@ export function scanNode(
   const hits: NodeScan['hits'] = []
   const probeHits: NodeScan['probeHits'] = []
 
+  // Discussion anchors: every template-token mention in this reasoning — the
+  // quoted tokens and their analogies cluster around these positions.
+  const anchors: number[] = discussion
+    ? [...reasoning.matchAll(TEMPLATE_TOKENS_GLOBAL)].map(m => m.index ?? 0)
+    : []
+
   // Dirty-token match strings feed the anomaly filter (EDMFunc-like rows are
   // already recorded; the anomaly detectors are for *unrecorded* leaks).
   const recorded = new Set<string>()
@@ -234,19 +259,25 @@ export function scanNode(
   for (const signal of SCANNED_SIGNALS) {
     const isProbe = signal.kind === 'probe'
     const isDiscussion = discussion && (signal.kind === 'template' || signal.kind === 'anomaly')
-    if (isDiscussion) continue
     const scope = isProbe ? (reasoning + '\n' + visible) : reasoning
     if (scope === '') continue
     const suppression = isProbe ? '' : echo
+    const near = isDiscussion && anchors.length > 0
+      // Exclude the match's own position: every template token is trivially
+      // an anchor for itself. Suppression means CLUSTERING with a *different*
+      // mention (quotes and their analogies sit together; an isolated organic
+      // leak has no neighbour and survives).
+      ? (start: number): boolean => anchors.some(a => a !== start && Math.abs(start - a) <= DISCUSSION_WINDOW)
+      : undefined
     let count = 0
     const samples: string[] = []
     for (const re of signal.match) {
-      count += scanRegex(scope, re, samples, 2, suppression)
+      count += scanRegex(scope, re, samples, 2, suppression, near)
     }
     if (count === 0) continue
     if (signal.kind === 'dirty-token') {
       for (const re of signal.match) {
-        for (const m of scope.match(re) ?? []) recorded.add(m)
+        for (const m of reasoning.matchAll(re)) recorded.add(m[0])
       }
     }
     ;(isProbe ? probeHits : hits).push({ id: signal.id, count, samples })
@@ -257,8 +288,8 @@ export function scanNode(
     const signal = SIGNAL_BY_ID.get(hit.id)
     if (signal?.kind !== 'anomaly') continue
     for (const re of signal.match) {
-      for (const m of reasoning.match(re) ?? []) {
-        if (recorded.has(m)) hit.count = Math.max(0, hit.count - 1)
+      for (const m of reasoning.matchAll(re)) {
+        if (recorded.has(m[0])) hit.count = Math.max(0, hit.count - 1)
       }
     }
   }
@@ -338,6 +369,14 @@ const TEMPLATE_PROMPT_RE: RegExp = (() => {
     .filter(signal => signal.kind === 'template')
     .flatMap(signal => signal.match.map(re => re.source))
   return new RegExp(sources.join('|'))
+})()
+
+/** All-match variant for discussion-anchor positions inside one reasoning text. */
+const TEMPLATE_TOKENS_GLOBAL: RegExp = (() => {
+  const sources = SCANNED_SIGNALS
+    .filter(signal => signal.kind === 'template')
+    .flatMap(signal => signal.match.map(re => re.source))
+  return new RegExp(sources.join('|'), 'g')
 })()
 
 function weightOf(signal: AttributionSignal): number {

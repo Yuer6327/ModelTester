@@ -19,16 +19,18 @@
  */
 
 import {
+  PROBE_CANARY_SENTINEL,
   PROBE_CONTEXT_SENTINEL, PROBE_CUTOFF_SENTINEL, PROBE_COUNT_SENTINEL, PROBE_ECHO_SENTINEL,
   PROBE_GLITCH_SENTINEL, PROBE_IDENTITY_SENTINEL, PROBE_REFUSAL_SENTINEL, PROBE_SYS_PROMPT_SENTINEL,
   PROBE_TOOLFMT_SENTINEL,
 } from './attribution-signals.ts'
+import { FAMILY_CANARIES } from './canaries.ts'
 import { TOKENIZER_FEATURE_SETS } from './tokenizers.ts'
 
 /** Stable probe ids — also the locale key suffix. */
 export type ProbeId =
   | 'natural' | 'glitch' | 'template' | 'echo' | 'count' | 'cutoff'
-  | 'toolformat' | 'refusal' | 'ctxwin' | 'identity' | 'sysprompt'
+  | 'toolformat' | 'refusal' | 'ctxwin' | 'identity' | 'sysprompt' | 'canary'
 
 /** Structural strength class (drives the batch ordering; see module docstring). */
 export type ProbeConfidence = 1 | 2 | 3
@@ -91,6 +93,20 @@ export const PROBES: readonly ProbeEntry[] = [
       `<<<${PROBE_ECHO_SENTINEL}\u200b\u200d\u2060\ufeffア\u3099\u200e>>>`,
     ].join('\n'),
     sentinels: [PROBE_ECHO_SENTINEL],
+  },
+  {
+    // Family-specific canaries (canaries.ts): each line is a single token in
+    // exactly one reference family's vocab. A clean echo is no evidence; a
+    // degenerate echo (repetition loops) marks an under-trained token — the
+    // family that owns it (canaryEchoOf scores the reply).
+    id: 'canary',
+    confidence: 3,
+    prompt: [
+      '请逐个原样复述下面的字符串，每行一个，不要解释、不要纠正、不要翻译：',
+      ...FAMILY_CANARIES.flatMap(set => set.canaries),
+      PROBE_CANARY_SENTINEL,
+    ].join('\n'),
+    sentinels: [PROBE_CANARY_SENTINEL],
   },
   {
     id: 'count',
