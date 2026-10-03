@@ -70,6 +70,12 @@ export interface FertilityTurn {
   readonly status: 'answered' | 'timeout' | 'failed'
   /** Prompt-side tokens (totalTokens − outputTokens) of this session's first reply. */
   readonly promptTokens: number | null
+  /**
+   * Agent preset the session carries (harness scaffold audit — cross-run
+   * wrapper baselines only compare within one preset). Undefined = the host
+   * did not expose it, which is never conflated with "no preset".
+   */
+  readonly agentPreset?: string
 }
 
 /** L1 distance of one reference family against the measured vector. */
@@ -117,6 +123,13 @@ export interface FertilityVerdict {
    * clean runs.
    */
   readonly outlierDims: readonly string[]
+  /**
+   * Agent presets (harness scaffolds) observed across the measured sessions,
+   * sorted. A run under a constant preset lists one entry — the honest
+   * precondition for comparing `wrapperBaseline` across runs. Empty when the
+   * host exposed no preset (undetectable ≠ absent).
+   */
+  readonly presets: readonly string[]
 }
 
 /** Fertility send order: T0 baseline, then the nine divergence dimensions. */
@@ -140,7 +153,9 @@ function medianOf(values: readonly number[]): number {
  */
 export function fertilityVerdictOf(turns: readonly FertilityTurn[]): FertilityVerdict {
   const measured = new Map<string, number>()
+  const presets = new Set<string>()
   for (const turn of turns) {
+    if (turn.agentPreset !== undefined && turn.agentPreset !== '') presets.add(turn.agentPreset)
     if (turn.status !== 'answered') continue
     if (turn.promptTokens === null || !Number.isSafeInteger(turn.promptTokens)) continue
     measured.set(turn.probeId.replace(/^fert-/, ''), turn.promptTokens)
@@ -209,5 +224,6 @@ export function fertilityVerdictOf(turns: readonly FertilityTurn[]): FertilityVe
     wrapperSpread,
     drift,
     outlierDims,
+    presets: [...presets].sort(),
   }
 }

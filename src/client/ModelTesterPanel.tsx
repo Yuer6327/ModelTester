@@ -22,7 +22,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { formatCount, type TrajectoryStats } from './stats.ts'
 import { evidencePack, type AttributionEvidence } from './attribution.ts'
 import { ALL_SIGNALS, type Vendor } from './attribution-signals.ts'
-import { loadStoredBatch, loadStoredFertility, saveStoredBatch, saveStoredFertility, loadParallelism, saveParallelism, type StoredBatch, type StoredFertility } from './panel-persist.ts'
+import { loadStoredBatch, loadStoredFertility, saveStoredBatch, saveStoredFertility, loadParallelism, saveParallelism, loadProbePreset, saveProbePreset, type StoredBatch, type StoredFertility } from './panel-persist.ts'
 import { aggregateBatch, batchEngineReportOf, batchScanText, canaryEchoOf, estimateTokens, familyHitsOf, identityClaimsOf, orderedProbes } from './batch.ts'
 import { FERTILITY_TEXTS, fertilityConfusablePair, fertilityTwinPair } from './fertility.ts'
 import { fertilitySequence, fertilityVerdictOf } from './fertility-score.ts'
@@ -31,7 +31,7 @@ import {
   type ChannelGrade, type ChannelResult,
 } from './verdict.ts'
 import { PROBES, type ProbeEntry } from './probes.ts'
-import { loadTestSessions, clearTestSessions } from './panel-persist.ts'
+import { loadTestSessions } from './panel-persist.ts'
 import type { HistoryState } from './session-store.ts'
 import type { ModelTesterKey } from './locales.ts'
 import type { BatchProgress, ModelTesterActions, ModelTesterPanelProps } from './slots.ts'
@@ -259,7 +259,21 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
     setParallelismState(value)
     saveParallelism(value)
   }
-  const runOptions = { parallelism }
+  /** Agent preset requested for probe sessions ('' = follow host default). */
+  const [probePreset, setProbePresetState] = useState(loadProbePreset)
+  const setProbePreset = (value: string): void => {
+    setProbePresetState(value)
+    saveProbePreset(value)
+  }
+  /** Live preset catalog from the host session list (detection channels). */
+  const [presetCatalog, setPresetCatalog] = useState<{ current: string | null; presets: readonly string[] } | null>(null)
+  useEffect(() => {
+    setPresetCatalog(actions?.probePresetCatalog?.() ?? null)
+  }, [actions, snap.sessionId])
+  const runOptions = {
+    parallelism,
+    ...(probePreset === '' ? {} : { probePreset: probePreset }),
+  }
 
   /** Fertility run: one fresh session per text, scored by usage deltas.
    *  Resumes an interrupted run automatically (persisted readings reused). */
@@ -291,8 +305,9 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
         probeId: turn.probeId,
         status: turn.status,
         promptTokens: turn.promptTokens ?? null,
+        ...(turn.agentPreset === undefined ? {} : { agentPreset: turn.agentPreset }),
       })))
-      const record = { at, verdict }
+      const record = { at, verdict, ...(probePreset === '' ? {} : { presetRequest: probePreset }) }
       setFertStored(record)
       saveStoredFertility(record)
     } catch {
@@ -373,6 +388,7 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
         return
       }
       const answered = response.turns.filter(turn => turn.status === 'answered').length
+      const runPresets = [...new Set(response.turns.map(turn => turn.agentPreset).filter((p): p is string => p !== undefined && p !== ''))].sort()
       // Engine report over the batch corpus itself (per-probe prompts feed
       // echo suppression), canary degeneration folded into the probe hits.
       const record: StoredBatch = {
@@ -385,6 +401,8 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
         }),
         claims: identityClaimsOf(response.turns),
         coverage: { answered, total: items.length },
+        ...(runPresets.length > 0 ? { presets: runPresets } : {}),
+        ...(probePreset === '' ? {} : { presetRequest: probePreset }),
       }
       setBatchStored(record)
       saveStoredBatch(record)
@@ -420,9 +438,9 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
     await runBatch(PROBES.filter(probe => probe.confidence === 3).map(probe => ({ id: probe.id, text: probe.prompt })))
   }
 
-  /** Bulk-delete the sessions this plugin minted during test runs. */
+  /** Bulk-archive the sessions this plugin minted during test runs. */
   const runCleanup = async (): Promise<void> => {
-    if (cleanupBusy || actions?.cleanupTestSessions === undefined) return
+    if (cleanupBusy || actions?.archiveTestSessions === undefined) return
     setCleanupBusy(true)
     setCleanupMessage('')
     const ids = loadTestSessions()
@@ -432,12 +450,11 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
       return
     }
     try {
-      const response = await actions.cleanupTestSessions(ids)
+      const response = await actions.archiveTestSessions(ids)
       if (!response.ok) {
         setCleanupMessage('unavailable')
       } else {
-        clearTestSessions(response.removed ?? [])
-        setCleanupCount(response.removed?.length ?? 0)
+        setCleanupCount(response.archived?.length ?? 0)
         setCleanupMessage('done')
       }
     } catch {
@@ -460,6 +477,14 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
   )
   const final = finalVerdictOf(channels)
   const agree = final !== null ? agreementWith(final, channels) : 0
+  // Preset picker options: host-enumerated presets ∪ the persisted choice ∪
+  // the main-view session's preset — never a hardcoded id list.
+  const presetOptions = useMemo(() => {
+    const set = new Set(presetCatalog?.presets ?? [])
+    if (probePreset !== '') set.add(probePreset)
+    if (presetCatalog?.current !== null && presetCatalog?.current !== undefined) set.add(presetCatalog.current)
+    return [...set].sort()
+  }, [presetCatalog, probePreset])
 
   return (
     <div
@@ -540,6 +565,12 @@ export function ModelTesterPanel({ useStats, t, actions }: ModelTesterPanelProps
           }}
           parallelism={parallelism}
           onParallelism={setParallelism}
+          preset={{
+            value: probePreset,
+            current: presetCatalog?.current ?? null,
+            options: presetOptions,
+            onChange: setProbePreset,
+          }}
         />
       </div>
     </div>
@@ -571,21 +602,27 @@ interface BatchState {
 }
 
 /**
- * Cleanup UI switch. The 0.1.7 host sessions face has no delete verb, and the
- * durable archive API (`ctx.workspaceRegistry` archiveSession/unarchiveSession)
- * stays inside the host — neither is reachable from the plugin contract face,
- * so the button could only ever end in "unavailable". Hidden until a host face
- * ships a plugin-reachable delete/archive verb; the action machinery and
- * session tracking stay wired underneath.
+ * Test-session cleanup state owned by the stable panel root. The archive
+ * button renders only when the host exposes the workspace archive channel
+ * (`actions.archiveTestSessions`) — the cleanup shape the 0.2.0 desktop host
+ * actually supports (its sessions face has no delete RPC).
  */
-const CLEANUP_UI_SHOWN = false
-
-/** Test-session cleanup state owned by the stable panel root. */
 interface CleanupState {
   busy: boolean
   message: '' | 'none' | 'unavailable' | 'done'
   count: number
   run: () => void
+}
+
+/** Probe-session preset selector state owned by the stable panel root. */
+interface PresetState {
+  /** Persisted choice ('' = follow host default). */
+  value: string
+  /** Main-view session's preset from the live catalog (null = undetectable). */
+  current: string | null
+  /** Host-enumerated options (∪ persisted choice ∪ current). */
+  options: readonly string[]
+  onChange: (value: string) => void
 }
 
 /** Expanded card body. Sections render in the ranked channel order. */
@@ -607,6 +644,7 @@ function PanelCard({
   cleanup,
   parallelism,
   onParallelism,
+  preset,
 }: {
   open: boolean
   onToggle: () => void
@@ -625,6 +663,7 @@ function PanelCard({
   cleanup: CleanupState
   parallelism: number
   onParallelism: (value: number) => void
+  preset: PresetState
 }) {
   return (
     <>
@@ -670,6 +709,7 @@ function PanelCard({
                     t={t}
                     parallelism={parallelism}
                     onParallelism={onParallelism}
+                    preset={preset}
                   />
                 )
               }
@@ -946,7 +986,7 @@ function EvidenceRow({ entry, t }: { entry: AttributionEvidence; t: ModelTesterP
  * and the probe checklist follow. The usage-fingerprint button lives on its
  * own channel card; the full battery covers both channels.
  */
-function ProbesSection({ t, actions, fert, batch, cleanup, parallelism, onParallelism }: {
+function ProbesSection({ t, actions, fert, batch, cleanup, parallelism, onParallelism, preset }: {
   t: ModelTesterPanelProps['t']
   actions?: ModelTesterActions
   fert: FertState
@@ -954,10 +994,12 @@ function ProbesSection({ t, actions, fert, batch, cleanup, parallelism, onParall
   cleanup: CleanupState
   parallelism: number
   onParallelism: (value: number) => void
+  preset: PresetState
 }) {
   const probes = useMemo(() => orderedProbes(), [])
   const canBatch = typeof actions?.runBatch === 'function'
   const canFertility = typeof actions?.runFertility === 'function'
+  const canArchive = typeof actions?.archiveTestSessions === 'function'
   const result = batchChannel(batch.stored)
   const trackedSessions = useMemo(() => loadTestSessions().length, [])
   const batteryTokens = useMemo(() => {
@@ -1022,6 +1064,26 @@ function ProbesSection({ t, actions, fert, batch, cleanup, parallelism, onParall
           </select>
         </div>
       )}
+      {canBatch && (
+        <div className={css.batchBar}>
+          <span className={css.batchTokens}>
+            {t('attr.preset.current')}: {preset.current ?? '—'}
+          </span>
+          <select
+            className={css.parallelSelect}
+            value={preset.value}
+            disabled={batch.running || fert.running}
+            title={t('attr.preset.note')}
+            onChange={event => preset.onChange(event.target.value)}
+            aria-label={t('attr.preset.label')}
+          >
+            <option value="">{t('attr.preset.follow')}</option>
+            {preset.options.map(value => (
+              <option key={value} value={value}>{value}</option>
+            ))}
+          </select>
+        </div>
+      )}
       {canBatch && batch.running && (
         <p className={css.empty}>
           {t('attr.batch.progress')} {Object.values(batch.status).filter(s => s === 'answered' || s === 'timeout').length}/{PROBES.length}
@@ -1040,7 +1102,7 @@ function ProbesSection({ t, actions, fert, batch, cleanup, parallelism, onParall
         ))}
       </div>
       {batch.error !== '' && <p className={css.empty}>{t('attr.batch.unavailable')}</p>}
-      {CLEANUP_UI_SHOWN && canBatch && (
+      {canArchive && (
         <div className={css.batchBar}>
           <button
             type="button"
@@ -1251,6 +1313,12 @@ function FertilitySection({ fert, actions, t }: {
           {verdict.wrapperBaseline !== null && (
             <p className={css.leakFacts}>{t('attr.fertility.wrapper')} {verdict.wrapperBaseline}</p>
           )}
+          {verdict.presets.length > 0 && (
+            <p className={css.leakFacts}>{t('attr.fertility.preset')} {verdict.presets.join(' · ')}</p>
+          )}
+          {stored.presetRequest !== undefined && !verdict.presets.includes(stored.presetRequest) && (
+            <p className={css.leakFacts}>{t('attr.preset.unconfirmed').replace('{preset}', stored.presetRequest)}</p>
+          )}
           <p className={css.leakFacts}>
             {t('attr.fertility.coverage')} {verdict.measured}/9
             {' · '}{t('attr.fertility.measuredAt')} {new Date(stored.at).toLocaleString()}
@@ -1266,7 +1334,7 @@ function BatchBody({ stored, t }: {
   stored: StoredBatch
   t: ModelTesterPanelProps['t']
 }) {
-  const { guess, claims, coverage, at } = stored
+  const { guess, claims, coverage, at, presets, presetRequest } = stored
   return (
     <div className={css.batchGuess}>
       {guess.vendor === null ? (
@@ -1302,6 +1370,10 @@ function BatchBody({ stored, t }: {
       )}
       <p className={css.leakFacts}>
         {coverage.answered}/{coverage.total} {t('attr.batch.answeredCount')}
+        {presets !== undefined && presets.length > 0 ? ` · ${t('attr.batch.preset')} ${presets.join(' · ')}` : ''}
+        {presetRequest !== undefined && (presets === undefined || !presets.includes(presetRequest))
+          ? ` · ${t('attr.preset.unconfirmed').replace('{preset}', presetRequest)}`
+          : ''}
         {' · '}{t('attr.batch.measuredAt')} {new Date(at).toLocaleString()}
       </p>
     </div>

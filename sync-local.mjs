@@ -84,4 +84,13 @@ if (mismatches > 0) {
   console.error(`[sync-local] ${mismatches} file(s) failed verification`)
   process.exit(1)
 }
+
+// Guard: the host composes its plugin graph from the PROFILE patch layer, and a
+// settings-driven rewrite of that file silently drops the plugin's insert entry
+// (measured 2026-10-02: the panel stopped mounting while every file here stayed
+// intact). Synced files alone prove nothing — the loader must still name us.
+const PROFILE_PATCH = join(homedir(), '.dsh', 'profiles', 'desktop', 'cordis.patch.yml')
+if (existsSync(PROFILE_PATCH) && !readFileSync(PROFILE_PATCH, 'utf8').includes('dsh-modeltester')) {
+  console.error(`[sync-local] WARNING ${PROFILE_PATCH} no longer inserts dsh-modeltester — the host will NOT load the plugin. Re-add:\n- insert:\n    - id: modeltester\n      name: dsh-modeltester`)
+}
 console.log(`[sync-local] ${synced.length} file(s) synced to desktop profile — reload to take effect`)

@@ -29,6 +29,12 @@ export interface BatchTurnResult {
   readonly prompt?: string
   /** Raw assistant blocks (reasoning + visible) when the host exposed them. */
   readonly blocks?: readonly AssistantBlockView[]
+  /**
+   * Agent preset (harness scaffold) the probe's session actually carries,
+   * from the host's create value or projection channels — undefined means
+   * "undetectable on this host", never "no preset".
+   */
+  readonly agentPreset?: string
 }
 
 /** Progress event for one probe of a batch run. */
@@ -39,9 +45,16 @@ export interface BatchProgress {
   readonly status: 'sending' | 'waiting' | 'answered' | 'timeout' | 'failed'
 }
 
-/** Runner options. `parallelism` bounds concurrent probes (1 = sequential). */
+/**
+ * Runner options. `parallelism` bounds concurrent probes (1 = sequential).
+ * `probePreset` requests an agent preset (harness scaffold) for every probe
+ * session the runner creates — best-effort: a host that rejects the preset
+ * falls back to its default and the verdict reports the preset as
+ * unconfirmed. Undefined follows the host default.
+ */
 export interface RunOptions {
   readonly parallelism?: number
+  readonly probePreset?: string
 }
 
 /** Probe-send actions backed by the host sessions face (feature-detected). */
@@ -111,6 +124,24 @@ export interface ModelTesterActions {
   cleanupTestSessions?(
     ids: readonly string[],
   ): Promise<{ ok: boolean; error?: string; removed?: readonly string[] }>
+  /**
+   * Bulk-ARCHIVE sessions the plugin itself created during test runs, through
+   * the client `ctx.remote.workspace` namespace (the sidebar's own archive
+   * mutation). Archived sessions leave the grouping lists while their stored
+   * logs stay on disk, so host usage dashboards keep their numbers — the
+   * cleanup shape the 0.2.0 desktop host actually supports. Optional; hosts
+   * without the namespace report `unavailable`.
+   */
+  archiveTestSessions?(
+    ids: readonly string[],
+  ): Promise<{ ok: boolean; error?: string; archived?: readonly string[] }>
+  /**
+   * Live agent-preset snapshot over the host session list: the main-view
+   * session's preset plus every preset currently exposed by any session.
+   * Presets are host-configured data — the panel bootstraps its picker from
+   * this instead of a hardcoded id list. Optional.
+   */
+  probePresetCatalog?(): { current: string | null; presets: readonly string[] }
 }
 
 /** Business face injected into the ModelTester panel component. */

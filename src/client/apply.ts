@@ -18,7 +18,7 @@
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
 import {
-  conversationViewOf, type AssistantBlockView, type ConversationPort, type ConversationView, type ConversationNodeView,
+  conversationViewOf, sessionPresetOf, type AssistantBlockView, type ConversationPort, type ConversationView, type ConversationNodeView,
 } from './conversation.ts'
 import { ModelTesterPanel } from './ModelTesterPanel.tsx'
 import { trackTestSession } from './panel-persist.ts'
@@ -32,8 +32,16 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   }
 }
 
-/** Cordis services required by the browser half. */
-export const inject = ['slots', 'sessions', 'uiConversation', 'locale']
+/**
+ * Cordis services required by the browser half.
+ *
+ * 0.2.0 treats this array as the ctx service authorization list (undeclared
+ * services are unreachable); 0.1.x reads it as an activation-order hint, so
+ * extra names are inert there. `remote`/`remote.workspace` power the
+ * test-session archive action and are feature-detected at runtime — hosts
+ * without them degrade to "unavailable", never hang.
+ */
+export const inject = ['slots', 'sessions', 'uiConversation', 'locale', 'remote', 'remote.workspace']
 
 /**
  * Browser root context as far as apply() is concerned.
@@ -88,6 +96,8 @@ export function apply(ctx: ClientContext): void {
       rerunFertilityProbes: rerunFertilityProbesOf(ctx),
       interruptedFertility: interruptedFertilityOf(ctx),
       cleanupTestSessions: cleanupTestSessionsOf(ctx),
+      archiveTestSessions: archiveTestSessionsOf(ctx),
+      probePresetCatalog: probePresetCatalogOf(ctx),
     },
     }),
   }, ModelTesterPanel))
@@ -122,22 +132,50 @@ interface ProbeSessionsPort {
  * retain/ready reference mechanism instead, so the caller must keep the
  * returned reference alive until the prompt (and any reply polling) settles
  * and then call `release()`; releasing starts local scope teardown.
+ *
+ * `agentPreset` (0.2.0 `SessionCreateRequest.agentPreset`) requests a harness
+ * scaffold for the probe session — per-session and immutable once created.
+ * The request is best-effort: when the host rejects it (unknown id, older
+ * host, strict request validation), the creation is retried WITHOUT the
+ * preset and the caller sees no resolved preset — a requested-but-unresolved
+ * preset must surface as "unconfirmed", never silently as control success.
+ * The resolved preset comes from the create return value when the host
+ * reports it, else from the live projection channels (detection read).
  * @param sessions - feature-detected sessions port.
- * @returns the open session id, its prompt face, and a release thunk (0.2.0
- * only), or undefined when the host lacks the face entirely.
+ * @param agentPreset - preset to request, or undefined to follow the host default.
+ * @returns the open session id, its prompt face, a release thunk (0.2.0
+ * only), and the preset the session actually carries (when detectable), or
+ * undefined when the host lacks the face entirely.
  */
 async function createOpenedSession(
   sessions: ProbeSessionsPort,
-): Promise<{ id: string; session?: { prompt?: unknown }; release?: () => void } | undefined> {
+  agentPreset?: string,
+): Promise<{ id: string; session?: { prompt?: unknown }; release?: () => void; agentPreset?: string } | undefined> {
   if (typeof sessions.create !== 'function') return undefined
-  const created = (await sessions.create({})) as { sessionId?: string } | string | undefined
+  let created: { sessionId?: string; agentPreset?: unknown } | string | undefined
+  let presetRejected = false
+  try {
+    created = (await sessions.create(agentPreset === undefined ? {} : { agentPreset })) as typeof created
+  } catch (error) {
+    if (agentPreset === undefined) throw error
+    // Unknown preset id or preset-ignorant host: retry on the host default
+    // and let `presetRejected` keep the audit honest.
+    presetRejected = true
+    created = (await sessions.create({})) as typeof created
+    void error
+  }
   const id = typeof created === 'string' ? created : (created?.sessionId ?? undefined)
   if (id === undefined) return undefined
   trackTestSession(id)
+  const resolved = !presetRejected && typeof created === 'object'
+    && typeof created.agentPreset === 'string' && created.agentPreset !== ''
+    ? created.agentPreset
+    : undefined
+  const preset = resolved ?? detectSessionPreset(sessions, id)
   if (typeof sessions.open === 'function') {
     sessions.open(id)
     const session = sessions.binding?.(id)?.session
-    return { id, session }
+    return { id, session, ...(preset === undefined ? {} : { agentPreset: preset }) }
   }
   if (typeof sessions.retain !== 'function') return undefined
   const reference = sessions.retain(id, { source: 'gateway' })
@@ -146,7 +184,29 @@ async function createOpenedSession(
     | { session?: { prompt?: unknown } }
     | undefined
   const session = bound?.session
-  return { id, session, release: () => reference.release() }
+  return { id, session, release: () => reference.release(), ...(preset === undefined ? {} : { agentPreset: preset }) }
+}
+
+/**
+ * Detection read of one session's agent preset over the live list snapshot:
+ * the summary row (`projectionValues.agentPreset` — the channel the host UI
+ * reads) first, then the projection channel (`values.agentPreset`). Both
+ * channels populate asynchronously after creation, so callers re-read at
+ * measurement time rather than trusting one early snapshot.
+ */
+function detectSessionPreset(sessions: ProbeSessionsPort, id: string): string | undefined {
+  try {
+    const snap = (sessions as { list?: { getSnapshot?: () => unknown } }).list?.getSnapshot?.() as
+      | { byId?: Record<string, unknown>; projectionsBySession?: Map<string, unknown> | Record<string, unknown> }
+      | undefined
+    if (snap === undefined) return undefined
+    const row = snap.byId?.[id]
+    const proj = snap.projectionsBySession
+    const projection = proj === undefined ? undefined : proj instanceof Map ? proj.get(id) : proj[id]
+    return sessionPresetOf(row, projection)
+  } catch {
+    return undefined
+  }
 }
 
 /**
@@ -264,6 +324,9 @@ interface FertRunState {
   probeIds: readonly string[]
   /** probeId → pre-created/created session id (survives restarts: the host keeps sessions). */
   sessionIds: Record<string, string>
+  /** probeId → agent preset the session actually carries (detection read;
+   *  absent entries mean "undetectable", never "no preset"). */
+  presets?: Record<string, string>
   /**
    * Probe ids whose text was already pushed into their session. A crash
    * between send and reading leaves the text parked in that session — a
@@ -287,7 +350,14 @@ function readFertRunState(storage: Storage | undefined): FertRunState | null {
     if (typeof parsed !== 'object' || parsed === null) return null
     const r = parsed as Partial<FertRunState>
     if (!Array.isArray(r.probeIds) || typeof r.sessionIds !== 'object' || r.sessionIds === null || !Array.isArray(r.done)) return null
-    return r as FertRunState
+    // Preset audit entries: keep only string values (older state files lack the field).
+    const presets: Record<string, string> = {}
+    if (typeof r.presets === 'object' && r.presets !== null) {
+      for (const [id, preset] of Object.entries(r.presets)) {
+        if (typeof preset === 'string' && preset !== '') presets[id] = preset
+      }
+    }
+    return { ...r, presets } as FertRunState
   } catch {
     return null
   }
@@ -354,6 +424,8 @@ interface BatchRunState {
     sessionId: string
     prompt?: string
     blocks?: readonly AssistantBlockView[]
+    /** Agent preset the session actually carries (detection read), when known. */
+    agentPreset?: string
   }[]
 }
 
@@ -453,6 +525,7 @@ function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['run
     const storage = typeof window === 'undefined' ? undefined : window.localStorage
     try {
       const sessions = ctx.sessions as unknown as ProbeSessionsPort
+      const presetRequest = options?.probePreset
       const turns: BatchTurnResult[] = []
 
       // --- Resume detection: same probe sequence → continue an interrupted run.
@@ -462,6 +535,7 @@ function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['run
         && items.every((item, i) => prev.probeIds[i] === item.id)
       const doneMap = new Map<string, FertRunState['done'][number]>()
       const sessionIds: Record<string, string> = {}
+      const presets: Record<string, string> = {}
       const sent = new Set<string>()
       if (resume && prev !== null) {
         // Only ANSWERED readings are measurements: failed/timeout probes
@@ -471,6 +545,7 @@ function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['run
           if (d.status === 'answered' && d.promptTokens !== null) doneMap.set(d.probeId, d)
         }
         Object.assign(sessionIds, prev.sessionIds)
+        Object.assign(presets, prev.presets ?? {})
         for (const id of prev.sent ?? []) sent.add(id)
       }
 
@@ -478,6 +553,7 @@ function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['run
         startedAt: prev?.startedAt ?? new Date().toISOString(),
         probeIds: items.map(item => item.id),
         sessionIds,
+        ...(Object.keys(presets).length > 0 ? { presets } : {}),
         sent: [...sent],
         done: [...doneMap.values()],
       })
@@ -491,7 +567,7 @@ function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['run
       //      whose session is `sent`-tainted get a FRESH one — the old session
       //      may already contain the probe text, and re-sending would double
       //      the wrapper in the reading.
-      const opened: { id: string; session?: { prompt?: unknown }; release?: () => void }[] = []
+      const opened: { id: string; session?: { prompt?: unknown }; release?: () => void; agentPreset?: string }[] = []
       for (let index = 0; index < items.length; index++) {
         const item = items[index]!
         onProgress?.({ index, total: items.length, probeId: item.id, status: 'sending' })
@@ -505,12 +581,15 @@ function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['run
             | { session?: { prompt?: unknown } }
             | undefined
           const session = bound?.session
-          opened[index] = { id: existingId, session, release: () => reference.release() }
+          const preset = presets[item.id] ?? detectSessionPreset(sessions, existingId)
+          if (preset !== undefined) presets[item.id] = preset
+          opened[index] = { id: existingId, session, release: () => reference.release(), ...(preset === undefined ? {} : { agentPreset: preset }) }
           continue
         }
-        const created = await createOpenedSession(sessions)
+        const created = await createOpenedSession(sessions, presetRequest)
         if (created === undefined) return { ok: false, error: 'unavailable' }
         sessionIds[item.id] = created.id
+        if (created.agentPreset !== undefined) presets[item.id] = created.agentPreset
         sent.delete(item.id)
         opened[index] = created
         writeFertRunState(storage, state())
@@ -581,11 +660,15 @@ function runFertilityOf(ctx: ClientContext): NonNullable<ModelTesterActions['run
         // The sent marker only clears on an ANSWERED reading — a timeout left
         // the text in the session, so a resume re-runs it in a fresh one.
         if (turn.status === 'answered') sent.delete(item.id)
+        // Preset audit: re-read the detection channels at measurement time —
+        // they populate asynchronously after creation.
+        const preset = opened[index]!.agentPreset ?? detectSessionPreset(sessions, id)
+        if (preset !== undefined) presets[item.id] = preset
         doneMap.set(item.id, { probeId: item.id, status: turn.status, promptTokens: turn.promptTokens ?? null, outputTokens: turn.outputTokens ?? null, sessionId: id })
         writeFertRunState(storage, state())
         release?.()
         report(turn.status)
-        return turn
+        return { ...turn, ...(preset === undefined ? {} : { agentPreset: preset }) }
       }
 
       const parallelism = clampParallelism(options?.parallelism)
@@ -626,14 +709,15 @@ function rerunFertilityProbesOf(ctx: ClientContext): NonNullable<ModelTesterActi
   return async (items, onProgress, options) => {
     try {
       const sessions = ctx.sessions as unknown as ProbeSessionsPort
+      const presetRequest = options?.probePreset
       const turns: BatchTurnResult[] = []
 
       // Fresh session per item, pre-created up front (locks the serving model).
-      const opened: { id: string; session?: { prompt?: unknown }; release?: () => void }[] = []
+      const opened: { id: string; session?: { prompt?: unknown }; release?: () => void; agentPreset?: string }[] = []
       for (let index = 0; index < items.length; index++) {
         const item = items[index]!
         onProgress?.({ index, total: items.length, probeId: item.id, status: 'sending' })
-        const created = await createOpenedSession(sessions)
+        const created = await createOpenedSession(sessions, presetRequest)
         if (created === undefined) return { ok: false, error: 'unavailable' }
         opened[index] = created
       }
@@ -677,7 +761,8 @@ function rerunFertilityProbesOf(ctx: ClientContext): NonNullable<ModelTesterActi
         }
         release?.()
         report(turn.status)
-        turns.push(turn)
+        const preset = opened[index]!.agentPreset ?? detectSessionPreset(sessions, opened[index]!.id)
+        turns.push({ ...turn, ...(preset === undefined ? {} : { agentPreset: preset }) })
       }
 
       const parallelism = clampParallelism(options?.parallelism)
@@ -691,6 +776,78 @@ function rerunFertilityProbesOf(ctx: ClientContext): NonNullable<ModelTesterActi
     } catch (error) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
+  }
+}
+
+/**
+ * Live agent-preset catalog over the session list: every preset the host's
+ * sessions currently expose (via the detection channels), plus the main-view
+ * session's preset. This is how the preset picker bootstraps without a
+ * hardcoded id list — presets are host-configured data, so the panel can only
+ * enumerate what the host itself shows. Best-effort: a host that exposes
+ * neither channel reports an empty catalog with `current: null`.
+ */
+function probePresetCatalogOf(ctx: ClientContext): NonNullable<ModelTesterActions['probePresetCatalog']> {
+  return () => {
+    const sessions = ctx.sessions as unknown as ProbeSessionsPort
+    const found = new Set<string>()
+    let current: string | null = null
+    try {
+      const snap = (sessions as { list?: { getSnapshot?: () => unknown } }).list?.getSnapshot?.() as
+        | { ids?: readonly string[]; byId?: Record<string, unknown>; projectionsBySession?: Map<string, unknown> | Record<string, unknown> }
+        | undefined
+      if (snap !== undefined) {
+        for (const key of snap.ids ?? []) {
+          const row = snap.byId?.[key]
+          const proj = snap.projectionsBySession
+          const projection = proj === undefined ? undefined : proj instanceof Map ? proj.get(key) : proj[key]
+          const preset = sessionPresetOf(row, projection)
+          if (preset === undefined) continue
+          found.add(preset)
+          if ((row as { retainedBy?: { mainView?: number } } | undefined)?.retainedBy?.mainView !== undefined
+            && ((row as { retainedBy?: { mainView?: number } }).retainedBy?.mainView ?? 0) > 0) {
+            current = preset
+          }
+        }
+      }
+    } catch {
+      /* a hostile snapshot shape must not break the panel */
+    }
+    return { current, presets: [...found].sort() }
+  }
+}
+
+/**
+ * Bulk-archive the plugin's own test sessions through the client
+ * `ctx.remote.workspace` namespace (`WorkspaceRemote.archiveSession`).
+ *
+ * This is the cleanup that actually exists on 0.2.0: the sessions face has no
+ * delete RPC, but the workspace controller archives any session — the same
+ * mutation the sidebar's 归档会话 button performs. Archiving removes sessions
+ * from the grouping lists while the stored logs stay on disk, so the host's
+ * usage dashboards (which fold over the logs) keep their numbers. Hosts
+ * without the namespace (0.1.x) report `unavailable`.
+ */
+export function archiveTestSessionsOf(ctx: ClientContext): NonNullable<ModelTesterActions['archiveTestSessions']> {
+  return async (ids) => {
+    const remote = ((ctx as { remote?: unknown }).remote ?? ctx.get?.('remote')) as
+      | {
+          workspace?: {
+            archiveSession?: (request: { sessionId: string }) => Promise<{ archivedSessionIds?: readonly string[] }>
+          }
+        }
+    const archive = remote?.workspace?.archiveSession
+    if (typeof archive !== 'function') return { ok: false, error: 'unavailable', archived: [] }
+    const archived: string[] = []
+    for (const id of ids) {
+      try {
+        await archive.call(remote.workspace, { sessionId: id })
+        archived.push(id)
+      } catch {
+        /* keep archiving the rest; the failed id simply stays listed */
+      }
+    }
+    return { ok: true, archived }
   }
 }
 
@@ -748,10 +905,11 @@ function cleanupTestSessionsOf(ctx: ClientContext): NonNullable<ModelTesterActio
  * re-runs the missing probes. The 0.1.x path is the same flow with `open()`.
  */
 function runBatchOf(ctx: ClientContext): NonNullable<ModelTesterActions['runBatch']> {
-  return async (items, onProgress, _options) => {
+  return async (items, onProgress, options) => {
     const storage = typeof window === 'undefined' ? undefined : window.localStorage
     try {
       const sessions = ctx.sessions as unknown as ProbeSessionsPort
+      const presetRequest = options?.probePreset
       const turns: BatchTurnResult[] = []
 
       // --- Resume reuse: same probe sequence → answered readings reused.
@@ -786,6 +944,7 @@ function runBatchOf(ctx: ClientContext): NonNullable<ModelTesterActions['runBatc
           ...(finished.blocks === undefined ? {} : { blocks: finished.blocks }),
           ...(finished.promptTokens === null ? {} : { promptTokens: finished.promptTokens }),
           ...(finished.outputTokens === null ? {} : { outputTokens: finished.outputTokens }),
+          ...(finished.agentPreset === undefined ? {} : { agentPreset: finished.agentPreset }),
         }
       })
       writeBatchRunState(storage, state())
@@ -801,7 +960,7 @@ function runBatchOf(ctx: ClientContext): NonNullable<ModelTesterActions['runBatc
         report('sending')
         // Create the probe's own session immediately before sending: the host
         // focuses it, so the assembly exists while this probe is collected.
-        const created = await createOpenedSession(sessions)
+        const created = await createOpenedSession(sessions, presetRequest)
         if (created === undefined) return { ok: false, error: 'unavailable' }
         const { id, session, release } = created
         const prompt = (session as { prompt?: unknown } | undefined)?.prompt
@@ -828,6 +987,7 @@ function runBatchOf(ctx: ClientContext): NonNullable<ModelTesterActions['runBatc
         }
         report('waiting')
         const turn = await waitForTurn(poller, before, item.id, item.text)
+        const preset = created.agentPreset ?? detectSessionPreset(sessions, id)
         doneMap.set(item.id, {
           probeId: item.id,
           status: turn.status,
@@ -837,11 +997,12 @@ function runBatchOf(ctx: ClientContext): NonNullable<ModelTesterActions['runBatc
           sessionId: id,
           prompt: item.text,
           blocks: turn.blocks,
+          ...(preset === undefined ? {} : { agentPreset: preset }),
         })
         writeBatchRunState(storage, state())
         release?.()
         report(turn.status)
-        turnsByIndex[index] = turn
+        turnsByIndex[index] = { ...turn, ...(preset === undefined ? {} : { agentPreset: preset }) }
       }
 
       for (let index = 0; index < items.length; index++) {

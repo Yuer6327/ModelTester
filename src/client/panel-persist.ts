@@ -23,12 +23,18 @@ export interface StoredBatch {
   readonly guess: BatchGuess
   readonly claims: readonly Vendor[]
   readonly coverage: { answered: number; total: number }
+  /** Agent presets observed across the run's sessions (audit; absent on old records). */
+  readonly presets?: readonly string[]
+  /** The preset the run requested (audit; absent = no request or old record). */
+  readonly presetRequest?: string
 }
 
 /** One stored fertility verdict with its measurement time. */
 export interface StoredFertility {
   readonly at: string
   readonly verdict: FertilityVerdict
+  /** The preset the run requested (audit; absent = no request or old record). */
+  readonly presetRequest?: string
 }
 
 function readRaw(key: string): unknown {
@@ -57,7 +63,7 @@ const CONFIDENCES = ['none', 'low', 'medium', 'high'] as const
 /** Validate a stored batch record (null on any shape/version problem). */
 export function parseStoredBatch(raw: unknown): StoredBatch | null {
   if (typeof raw !== 'object' || raw === null) return null
-  const r = raw as { at?: unknown; guess?: unknown; claims?: unknown; coverage?: unknown }
+  const r = raw as { at?: unknown; guess?: unknown; claims?: unknown; coverage?: unknown; presets?: unknown; presetRequest?: unknown }
   if (typeof r.at !== 'string' || typeof r.guess !== 'object' || r.guess === null) return null
   const g = r.guess as { vendor?: unknown; confidence?: unknown; confidenceValue?: unknown; hits?: unknown }
   // vendor: null is a valid stored outcome ("nothing rankable this run").
@@ -80,10 +86,17 @@ export function parseStoredBatch(raw: unknown): StoredBatch | null {
     && typeof (r.coverage as { total?: unknown }).total === 'number'
     ? { answered: (r.coverage as { answered: number }).answered, total: (r.coverage as { total: number }).total }
     : { answered: 0, total: 0 }
+  // Preset audit fields: absent on records from before the preset surface.
+  const presets = Array.isArray(r.presets)
+    ? [...new Set(r.presets.filter((p): p is string => typeof p === 'string' && p !== ''))].sort()
+    : undefined
+  const presetRequest = typeof r.presetRequest === 'string' && r.presetRequest !== '' ? r.presetRequest : undefined
   return {
     at: r.at,
     claims,
     coverage,
+    ...(presets === undefined || presets.length === 0 ? {} : { presets }),
+    ...(presetRequest === undefined ? {} : { presetRequest }),
     guess: {
       vendor,
       confidence: g.confidence as BatchGuess['confidence'],
@@ -97,11 +110,11 @@ export function parseStoredBatch(raw: unknown): StoredBatch | null {
 /** Validate a stored fertility record (null on any shape/version problem). */
 export function parseStoredFertility(raw: unknown): StoredFertility | null {
   if (typeof raw !== 'object' || raw === null) return null
-  const r = raw as { at?: unknown; verdict?: unknown }
+  const r = raw as { at?: unknown; verdict?: unknown; presetRequest?: unknown }
   if (typeof r.at !== 'string' || typeof r.verdict !== 'object' || r.verdict === null) return null
   const v = r.verdict as {
     measured?: unknown; measuredCounts?: unknown; wrapperBaseline?: unknown; usable?: unknown
-    drift?: unknown; wrapperSpread?: unknown; candidates?: unknown; outlierDims?: unknown
+    drift?: unknown; wrapperSpread?: unknown; candidates?: unknown; outlierDims?: unknown; presets?: unknown
   }
   if (typeof v.measured !== 'number' || typeof v.usable !== 'boolean' || !Array.isArray(v.candidates)) return null
   const candidates = []
@@ -133,8 +146,15 @@ export function parseStoredFertility(raw: unknown): StoredFertility | null {
   const outlierDims = Array.isArray(v.outlierDims)
     ? v.outlierDims.filter((d): d is string => typeof d === 'string')
     : []
+  // Preset audit: absent on records from before the preset surface (and on
+  // pre-preset scorer output, which parse must not fabricate as "no preset").
+  const presets = Array.isArray(v.presets)
+    ? [...new Set(v.presets.filter((p): p is string => typeof p === 'string' && p !== ''))].sort()
+    : []
+  const presetRequest = typeof r.presetRequest === 'string' && r.presetRequest !== '' ? r.presetRequest : undefined
   return {
     at: r.at,
+    ...(presetRequest === undefined ? {} : { presetRequest }),
     verdict: {
       candidates,
       measured: v.measured,
@@ -144,6 +164,7 @@ export function parseStoredFertility(raw: unknown): StoredFertility | null {
       wrapperSpread,
       drift: v.drift === true,
       outlierDims,
+      presets,
     },
   }
 }
@@ -221,6 +242,37 @@ export function saveParallelism(value: number): void {
   const clamped = Math.max(1, Math.min(8, Math.round(value)))
   try {
     if (typeof window !== 'undefined') window.localStorage.setItem(PARALLELISM_KEY, String(clamped))
+  } catch {
+    /* non-fatal */
+  }
+}
+
+/**
+ * Agent preset requested for newly created probe sessions; '' (the default)
+ * follows the host default. The picker lists only presets the host's own
+ * sessions exposed — preset ids are host-configured data, so the panel never
+ * guesses one.
+ */
+const PROBE_PRESET_KEY = 'dsh-modeltester.probePreset'
+
+export function loadProbePreset(): string {
+  try {
+    const raw = typeof window === 'undefined' ? null : window.localStorage.getItem(PROBE_PRESET_KEY)
+    if (raw === null) return ''
+    const value = raw.trim()
+    // Ids are short host tokens; anything oversized or whitespace-laden is stale junk.
+    return value !== '' && value.length <= 64 && !/\s/.test(value) ? value : ''
+  } catch {
+    return ''
+  }
+}
+
+export function saveProbePreset(value: string): void {
+  try {
+    if (typeof window === 'undefined') return
+    const trimmed = value.trim()
+    if (trimmed === '') window.localStorage.removeItem(PROBE_PRESET_KEY)
+    else window.localStorage.setItem(PROBE_PRESET_KEY, trimmed)
   } catch {
     /* non-fatal */
   }

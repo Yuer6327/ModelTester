@@ -73,17 +73,57 @@ export interface SessionPort {
   loadOlder(): Promise<void>
 }
 
+/**
+ * One session summary row of the 0.2.0 list snapshot. Structural: every member
+ * optional, unknown-typed beyond what the plugin reads. `projectionValues` is
+ * the client-side projection map the host UI itself reads the agent preset
+ * from (`byId[id].projectionValues.agentPreset`); `blank` marks the host's
+ * blank new-tab session.
+ */
+export interface SessionRowView {
+  readonly id?: unknown
+  readonly retainedBy?: { mainView?: number }
+  readonly blank?: unknown
+  readonly projectionValues?: Record<string, unknown>
+}
+
 /** `ctx.sessions` subset used by the live conversation observable. */
 export interface SessionsPort {
   readonly list: {
     getSnapshot(): {
       readonly current?: string
       readonly ids?: readonly string[]
-      readonly byId?: Record<string, { id?: unknown; retainedBy?: { mainView?: number } }>
+      readonly byId?: Record<string, SessionRowView>
+      readonly projectionsBySession?: Map<string, unknown> | Record<string, unknown>
     }
     subscribe(fn: () => void): () => void
   }
   binding(id: string): { readonly session: SessionPort } | undefined
+}
+
+/**
+ * Agent preset id carried by one session, read structurally across both host
+ * channels: the summary row (`projectionValues.agentPreset`) first, then the
+ * projection channel (`projectionsBySession[id].values.agentPreset`). Both are
+ * optional — a host that exposes neither reports no preset (undefined), which
+ * callers must treat as "undetectable", never as "no preset".
+ * @param row - summary row of the session, when available.
+ * @param projection - projection-channel entry of the session, when available.
+ */
+export function sessionPresetOf(row: unknown, projection?: unknown): string | undefined {
+  if (typeof row === 'object' && row !== null) {
+    const values = (row as { projectionValues?: unknown }).projectionValues
+    if (typeof values === 'object' && values !== null) {
+      const preset = (values as { agentPreset?: unknown }).agentPreset
+      if (typeof preset === 'string' && preset !== '') return preset
+    }
+  }
+  if (typeof projection === 'object' && projection !== null) {
+    const values = (projection as { values?: unknown }).values
+    const preset = values instanceof Map ? values.get('agentPreset') : (values as Record<string, unknown> | null)?.['agentPreset']
+    if (typeof preset === 'string' && preset !== '') return preset
+  }
+  return undefined
 }
 
 /**

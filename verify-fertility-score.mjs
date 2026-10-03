@@ -135,6 +135,78 @@ const DS = { T0: 2, T1: 42, T2: 80, T3: 52, T4: 64, T5: 69, T6: 68, T7: 33, T8: 
   check('persist: junk rejected', parseStoredFertility({ at: 5 }), null)
 }
 
+
+// --- 7. Preset audit: verdict collects session presets; persist round-trips
+{
+  // Turns under one constant preset: verdict carries the single entry.
+  const turns = [
+    { probeId: 'fert-T0', status: 'answered', promptTokens: 502, agentPreset: 'ptc' },
+    ...Object.entries(MM).filter(([id]) => id !== 'T0').map(([id, c]) => ({ probeId: `fert-${id}`, status: 'answered', promptTokens: 500 + c, agentPreset: 'ptc' })),
+  ]
+  const v = fertilityVerdictOf(turns)
+  check('preset: constant preset collapses to one entry', v.presets, ['ptc'])
+  check('preset: mixed presets sort-dedupe', fertilityVerdictOf([
+    { probeId: 'fert-T0', status: 'answered', promptTokens: 502, agentPreset: 'ptc' },
+    { probeId: 'fert-T1', status: 'answered', promptTokens: 540, agentPreset: 'minimal' },
+    { probeId: 'fert-T2', status: 'answered', promptTokens: 578, agentPreset: 'ptc' },
+  ]).presets, ['minimal', 'ptc'])
+  // Undetectable must never masquerade as "no preset": empty list, not a value.
+  check('preset: undetectable stays empty', fertilityVerdictOf(turnsOf(MM)).presets, [])
+  // The scoring itself is preset-blind (audit only): same vector, same ranking.
+  const blind = fertilityVerdictOf(turnsOf(MM))
+  check('preset: scoring unaffected by audit field', [v.candidates[0].family.id, v.candidates[0].l1], [blind.candidates[0].family.id, blind.candidates[0].l1])
+}
+{
+  const { parseStoredFertility } = await import('./src/client/panel-persist.ts')
+  const stored = parseStoredFertility({
+    at: 'x',
+    presetRequest: 'ptc',
+    verdict: { measured: 9, usable: true, wrapperBaseline: 502, presets: ['ptc'], candidates: [{ familyId: 'minimax-m3', l1: 0, dims: 9 }] },
+  })
+  check('persist: fertility presetRequest roundtrip', stored.presetRequest, 'ptc')
+  check('persist: fertility verdict presets roundtrip', stored.verdict.presets, ['ptc'])
+  // Pre-preset records parse to an EMPTY presets list — display-only absence.
+  const legacy = parseStoredFertility({
+    at: 'x', verdict: { measured: 9, usable: true, wrapperBaseline: 502, candidates: [{ familyId: 'minimax-m3', l1: 0, dims: 9 }] },
+  })
+  check('persist: legacy fertility record defaults presets empty', legacy.verdict.presets, [])
+  check('persist: legacy fertility record has no presetRequest', legacy.presetRequest, undefined)
+  // Junk entries in the audit array are dropped, not fatal.
+  check('persist: junk preset values filtered', parseStoredFertility({
+    at: 'x', verdict: { measured: 9, usable: true, wrapperBaseline: 502, presets: ['ptc', 5, '', null], candidates: [{ familyId: 'minimax-m3', l1: 0, dims: 9 }] },
+  }).verdict.presets, ['ptc'])
+}
+{
+  const { parseStoredBatch } = await import('./src/client/panel-persist.ts')
+  const base = {
+    at: 'x',
+    guess: { vendor: null, confidence: 'none', confidenceValue: 0, hits: [] },
+    claims: [],
+    coverage: { answered: 0, total: 0 },
+  }
+  const withPresets = parseStoredBatch({ ...base, presets: ['ptc', 'ptc'], presetRequest: 'minimal' })
+  check('persist: batch presets dedupe-sort', withPresets.presets, ['ptc'])
+  check('persist: batch presetRequest roundtrip', withPresets.presetRequest, 'minimal')
+  check('persist: batch legacy record omits audit fields', parseStoredBatch(base).presets, undefined)
+}
+
+// --- 8. sessionPresetOf: structural read across both host channels --------
+{
+  const { sessionPresetOf } = await import('./src/client/conversation.ts')
+  // Summary row channel (the one the host UI reads).
+  check('preset: row projectionValues read', sessionPresetOf({ projectionValues: { agentPreset: 'ptc' } }), 'ptc')
+  // Projection-channel fallbacks: record and Map shapes.
+  check('preset: projection record read', sessionPresetOf(undefined, { values: { agentPreset: 'minimal' } }), 'minimal')
+  check('preset: projection map read', sessionPresetOf({}, { values: new Map([['agentPreset', 'ptc']]) }), 'ptc')
+  // Row wins over projection when both exist.
+  check('preset: row channel wins', sessionPresetOf({ projectionValues: { agentPreset: 'ptc' } }, { values: { agentPreset: 'minimal' } }), 'ptc')
+  // Absence is undefined — never a fabricated "no preset".
+  check('preset: absent channels are undefined', sessionPresetOf(undefined, undefined), undefined)
+  check('preset: empty string treated as absent', sessionPresetOf({ projectionValues: { agentPreset: '' } }), undefined)
+  check('preset: non-string values rejected', sessionPresetOf({ projectionValues: { agentPreset: 7 } }), undefined)
+  check('preset: junk shapes survive', sessionPresetOf(null, 'x'), undefined)
+}
+
 if (failures > 0) {
   console.error(`verify-fertility-score: ${failures} failure(s)`)
   process.exit(1)
