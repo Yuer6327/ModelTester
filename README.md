@@ -1,5 +1,4 @@
-<img width="1710" height="1082" alt="" src="https://github.com/user-attachments/assets/ef968872-f49b-4183-9b20-9e9fe6846466" />
-
+<img width="1917" height="1136" alt="dsh-modeltester" src="https://github.com/user-attachments/assets/e394f5c3-e2f6-4fe4-b741-799c471e3728" />
 
 # ModelTester · dsh 模型检测面板
 
